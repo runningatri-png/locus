@@ -1,15 +1,19 @@
-export default async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response(null, {
+const fetch = require('node-fetch')
+
+exports.handler = async (event) => {
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 200,
       headers: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'POST',
         'Access-Control-Allow-Headers': 'Content-Type',
       },
-    })
+      body: '',
+    }
   }
 
-  const { system, messages } = await req.json()
+  const { system, messages } = JSON.parse(event.body)
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -28,12 +32,12 @@ export default async (req) => {
 
   const data = await response.json()
 
-  return new Response(JSON.stringify(data), {
+  return {
+    statusCode: 200,
     headers: {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
     },
-  })
+    body: JSON.stringify(data),
+  }
 }
-
-export const config = { path: '/api/claude' }
