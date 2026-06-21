@@ -15,9 +15,7 @@ function load(key, fallback) {
   try {
     const v = localStorage.getItem(key);
     return v ? JSON.parse(v) : fallback;
-  } catch {
-    return fallback;
-  }
+  } catch { return fallback; }
 }
 
 function save(key, val) {
@@ -40,20 +38,12 @@ function buildContext(goals, tasks, habits, ideas, skipPatterns) {
   const fp = sorted.filter((g) => g.p === "front");
   const mp = sorted.filter((g) => g.p === "maint");
   const bp = sorted.filter((g) => g.p === "back");
-  const fg = (arr) =>
-    arr.length
-      ? arr.map((g) => `- ${g.name} (${g.area})${g.deadline ? ", by " + g.deadline : ""}${g.desc ? ": " + g.desc : ""}`).join("\n")
-      : "None";
+  const fg = (arr) => arr.length ? arr.map((g) => `- [id:${g.id}] ${g.name} (${g.area})${g.deadline ? ", by " + g.deadline : ""}${g.desc ? ": " + g.desc : ""}`).join("\n") : "None";
   const pt = tasks.filter((t) => !t.done);
-  const ft = pt.length
-    ? pt.map((t) => `- ${t.name}${t.due ? ", due " + t.due : ""}${t.goal ? " [goal: " + t.goal + "]" : ""}${t.imp ? " [importance: " + t.imp + "/3]" : ""}`).join("\n")
-    : "None";
-  const patterns = Object.entries(skipPatterns)
-    .filter(([, c]) => c >= 2)
-    .map(([k, c]) => `- "${k}" skipped/rescheduled ${c}x`)
-    .join("\n") || "None";
-  const habitCtx = habits.map((h) => `- ${h.name} (${h.freq})${h.note ? ": " + h.note : ""}, streak: ${h.streak} days`).join("\n") || "None";
-  return `USER CONTEXT:\n\nLONG-TERM GOALS:\nFront burner:\n${fg(fp)}\nMaintenance:\n${fg(mp)}\nBack burner:\n${fg(bp)}\n\nPENDING TASKS:\n${ft}\n\nHABITS:\n${habitCtx}\n\nSKIP PATTERNS (blocks consistently avoided):\n${patterns}\n\nIDEAS PARKING LOT:\n${ideas.map((i) => "- " + i.t).join("\n") || "None"}`;
+  const ft = pt.length ? pt.map((t) => `- [id:${t.id}] ${t.name}${t.due ? ", due " + t.due : ""}${t.goal ? " [goal: " + t.goal + "]" : ""}${t.imp ? " [importance: " + t.imp + "/3]" : ""}`).join("\n") : "None";
+  const patterns = Object.entries(skipPatterns).filter(([, c]) => c >= 2).map(([k, c]) => `- "${k}" skipped ${c}x`).join("\n") || "None";
+  const habitCtx = habits.map((h) => `- [id:${h.id}] ${h.name} (${h.freq})${h.note ? ": " + h.note : ""}, streak: ${h.streak} days, ticked today: ${h.tickedToday}`).join("\n") || "None";
+  return `USER CONTEXT:\n\nLONG-TERM GOALS:\nFront burner:\n${fg(fp)}\nMaintenance:\n${fg(mp)}\nBack burner:\n${fg(bp)}\n\nPENDING TASKS:\n${ft}\n\nHABITS:\n${habitCtx}\n\nSKIP PATTERNS:\n${patterns}\n\nIDEAS:\n${ideas.map((i) => `- [id:${i.id}] ${i.t}`).join("\n") || "None"}`;
 }
 
 const IMP_COLORS = ["", "#706d68", "#8eaefb", "#f28b82"];
@@ -89,6 +79,7 @@ export default function App() {
   const [rescheduleReason, setRescheduleReason] = useState("");
   const [rescheduleTime, setRescheduleTime] = useState("");
   const [ideaInput, setIdeaInput] = useState("");
+  const [actionFeedback, setActionFeedback] = useState("");
 
   useEffect(() => { save(STORAGE_KEYS.goals, goals); }, [goals]);
   useEffect(() => { save(STORAGE_KEYS.tasks, tasks); }, [tasks]);
@@ -108,54 +99,116 @@ export default function App() {
     });
   };
 
-  const generatePlan = async () => {
+  const applyAction = (action, goalsSnap, tasksSnap, habitsSnap, ideasSnap) => {
+    if (!action || !action.type) return { goalsSnap, tasksSnap, habitsSnap, ideasSnap };
+    let feedback = "";
+    switch (action.type) {
+      case "add_goal": {
+        const g = { id: Date.now().toString(), name: action.name, area: action.area || "Other", desc: action.desc || "", deadline: action.deadline || "", p: action.priority || "maint" };
+        goalsSnap = [...goalsSnap, g];
+        feedback = `Added goal: ${g.name}`;
+        break;
+      }
+      case "edit_goal": {
+        goalsSnap = goalsSnap.map((g) => g.id === action.id ? { ...g, ...action.updates } : g);
+        feedback = `Updated goal`;
+        break;
+      }
+      case "delete_goal": {
+        goalsSnap = goalsSnap.filter((g) => g.id !== action.id);
+        feedback = `Deleted goal`;
+        break;
+      }
+      case "add_task": {
+        const t = { id: Date.now().toString(), name: action.name, due: action.due || "", goal: action.goal || "", desc: "", imp: action.importance || 2, done: false };
+        tasksSnap = [...tasksSnap, t];
+        feedback = `Added task: ${t.name}`;
+        break;
+      }
+      case "complete_task": {
+        tasksSnap = tasksSnap.map((t) => t.id === action.id || t.name.toLowerCase().includes((action.name || "").toLowerCase()) ? { ...t, done: true } : t);
+        feedback = `Marked task complete`;
+        break;
+      }
+      case "delete_task": {
+        tasksSnap = tasksSnap.filter((t) => t.id !== action.id);
+        feedback = `Deleted task`;
+        break;
+      }
+      case "add_habit": {
+        const h = { id: Date.now().toString(), name: action.name, freq: action.freq || "daily", note: action.note || "", streak: 0, history: [0,0,0,0,0,0,0], tickedToday: false };
+        habitsSnap = [...habitsSnap, h];
+        feedback = `Added habit: ${h.name}`;
+        break;
+      }
+      case "tick_habit": {
+        habitsSnap = habitsSnap.map((h) => {
+          if (h.id === action.id || h.name.toLowerCase().includes((action.name || "").toLowerCase())) {
+            const ticked = action.value !== undefined ? action.value : true;
+            return { ...h, tickedToday: ticked, streak: ticked ? h.streak + 1 : Math.max(0, h.streak - 1), history: [...(h.history || [0,0,0,0,0,0,0]).slice(1), ticked ? 1 : 0] };
+          }
+          return h;
+        });
+        feedback = `Updated habit`;
+        break;
+      }
+      case "add_idea": {
+        const i = { id: Date.now().toString(), t: action.text };
+        ideasSnap = [...ideasSnap, i];
+        feedback = `Added idea`;
+        break;
+      }
+      default: break;
+    }
+    if (feedback) {
+      setActionFeedback(feedback);
+      setTimeout(() => setActionFeedback(""), 3000);
+    }
+    return { goalsSnap, tasksSnap, habitsSnap, ideasSnap };
+  };
+
+  const generatePlan = async (goalsRef, tasksRef, habitsRef, ideasRef, skipRef) => {
     setPlanLoading(true);
-    const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns);
+    const ctx = buildContext(goalsRef || goals, tasksRef || tasks, habitsRef || habits, ideasRef || ideas, skipRef || skipPatterns);
     try {
       const text = await callClaude(
-        `You are a personal day planner for Locus. ${ctx}\n\nGenerate a realistic time-blocked day plan. Rules:\n- Front burner goals get the most time\n- Maintenance goals get shorter blocks\n- Back burner only if space\n- Pending tasks get specific slots by importance\n- Habits are constraints, weave them in\n- Avoid blocks that match skip patterns — restructure timing instead\n- Include flex time\n- Respond ONLY with a JSON array, no markdown, no explanation. Format: [{"time":"7:00 - 9:00 am","title":"Block title","desc":"Description","imp":3}]. imp is 1-3.`,
+        `You are a personal day planner for Locus. ${ctx}\n\nGenerate a realistic time-blocked day plan. Rules:\n- Front burner goals get the most time\n- Maintenance goals get shorter blocks\n- Back burner only if space\n- Pending tasks get specific slots by importance\n- Habits are constraints, weave them in\n- Avoid blocks that match skip patterns\n- Include flex time\n- Respond ONLY with a JSON array, no markdown. Format: [{"time":"7:00 - 9:00 am","title":"Block title","desc":"Description","imp":3}]. imp is 1-3.`,
         [{ role: "user", content: "Build my plan for today." }]
       );
       const clean = text.replace(/```json|```/g, "").trim();
       const blocks = JSON.parse(clean).map((b, i) => ({ ...b, id: "b" + i, done: false, status: "pending" }));
       setPlanBlocks(blocks);
     } catch (e) {
-      alert("Error generating plan. Check your API key and try again.");
+      alert("Error generating plan.");
     }
     setPlanLoading(false);
   };
 
   const toggleBlock = (id) => {
-    setPlanBlocks((prev) =>
-      prev.map((b) => {
-        if (b.id !== id) return b;
-        if (!b.done) addHistory("task", `Completed: ${b.title}`);
-        return { ...b, done: !b.done };
-      })
-    );
+    setPlanBlocks((prev) => prev.map((b) => {
+      if (b.id !== id) return b;
+      if (!b.done) addHistory("task", `Completed: ${b.title}`);
+      return { ...b, done: !b.done };
+    }));
     if (navigator.vibrate) navigator.vibrate([12, 8, 20]);
   };
 
   const skipBlock = (id) => {
-    setPlanBlocks((prev) =>
-      prev.map((b) => {
-        if (b.id !== id) return b;
-        setSkipPatterns((sp) => ({ ...sp, [b.title]: (sp[b.title] || 0) + 1 }));
-        addHistory("skip", `Skipped: ${b.title}`);
-        return { ...b, status: "skipped" };
-      })
-    );
+    setPlanBlocks((prev) => prev.map((b) => {
+      if (b.id !== id) return b;
+      setSkipPatterns((sp) => ({ ...sp, [b.title]: (sp[b.title] || 0) + 1 }));
+      addHistory("skip", `Skipped: ${b.title}`);
+      return { ...b, status: "skipped" };
+    }));
   };
 
   const confirmReschedule = () => {
-    setPlanBlocks((prev) =>
-      prev.map((b) => {
-        if (b.id !== rescheduleModal) return b;
-        setSkipPatterns((sp) => ({ ...sp, [b.title]: (sp[b.title] || 0) + 1 }));
-        addHistory("reschedule", `Rescheduled: ${b.title}${rescheduleTime ? " -> " + rescheduleTime : ""}${rescheduleReason ? " (" + rescheduleReason + ")" : ""}`);
-        return { ...b, status: "rescheduled", newTime: rescheduleTime, conflict: rescheduleReason };
-      })
-    );
+    setPlanBlocks((prev) => prev.map((b) => {
+      if (b.id !== rescheduleModal) return b;
+      setSkipPatterns((sp) => ({ ...sp, [b.title]: (sp[b.title] || 0) + 1 }));
+      addHistory("reschedule", `Rescheduled: ${b.title}${rescheduleTime ? " -> " + rescheduleTime : ""}${rescheduleReason ? " (" + rescheduleReason + ")" : ""}`);
+      return { ...b, status: "rescheduled", newTime: rescheduleTime, conflict: rescheduleReason };
+    }));
     setRescheduleModal(null);
     setRescheduleReason("");
     setRescheduleTime("");
@@ -170,10 +223,57 @@ export default function App() {
     const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns);
     try {
       const reply = await callClaude(
-        `You are a personal planner assistant inside Locus. ${ctx}\n\nHelp the user think through planning, priorities, balance, and what to focus on. Be concise and direct. Reference their actual goals and patterns.`,
+        `You are a personal planner assistant inside Locus. You can directly modify the user's data by including a JSON action in your response.
+
+${ctx}
+
+AVAILABLE ACTIONS (include at most one per response):
+- Add goal: {"action":{"type":"add_goal","name":"...","area":"Fitness|Career|Learning|Social|Finance|Health|Creative|Other","desc":"...","deadline":"...","priority":"front|maint|back"}}
+- Edit goal: {"action":{"type":"edit_goal","id":"...","updates":{"name":"...","p":"...","desc":"..."}}}
+- Delete goal: {"action":{"type":"delete_goal","id":"..."}}
+- Add task: {"action":{"type":"add_task","name":"...","due":"...","goal":"...","importance":1|2|3}}
+- Complete task: {"action":{"type":"complete_task","name":"..."}}
+- Delete task: {"action":{"type":"delete_task","id":"..."}}
+- Add habit: {"action":{"type":"add_habit","name":"...","freq":"daily|weekdays|3x|weekly","note":"..."}}
+- Tick habit: {"action":{"type":"tick_habit","name":"..."}}
+- Add idea: {"action":{"type":"add_idea","text":"..."}}
+
+FORMAT: Respond with your message text, then on the very last line put the action JSON if needed. Example:
+Got it, I've added that goal for you.
+{"action":{"type":"add_goal","name":"Learn piano","area":"Learning","priority":"back"}}
+
+If no action needed, just respond normally with no JSON.`,
         [...chatHistory, { role: "user", content: userMsg }]
       );
-      setChatHistory((prev) => [...prev, { role: "assistant", content: reply }]);
+
+      let message = reply;
+      let action = null;
+
+      const lines = reply.trim().split("\n");
+      const lastLine = lines[lines.length - 1].trim();
+      if (lastLine.startsWith('{"action"')) {
+        try {
+          const parsed = JSON.parse(lastLine);
+          if (parsed.action) {
+            action = parsed.action;
+            message = lines.slice(0, -1).join("\n").trim();
+          }
+        } catch (e) {}
+      }
+
+      if (action) {
+        const { goalsSnap, tasksSnap, habitsSnap, ideasSnap } = applyAction(action, goals, tasks, habits, ideas);
+        setGoals(goalsSnap);
+        setTasks(tasksSnap);
+        setHabits(habitsSnap);
+        setIdeas(ideasSnap);
+
+        if (action.type === "generate_plan") {
+          await generatePlan(goalsSnap, tasksSnap, habitsSnap, ideasSnap, skipPatterns);
+        }
+      }
+
+      setChatHistory((prev) => [...prev, { role: "assistant", content: message }]);
     } catch {
       setChatHistory((prev) => [...prev, { role: "assistant", content: "Error connecting. Try again." }]);
     }
@@ -199,9 +299,7 @@ export default function App() {
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "#1a1a20", color: "#f2efe9", fontFamily: "'Geist', 'Inter', sans-serif", fontSize: 14 }}>
 
-      {sidebarOpen && (
-        <div onClick={() => setSidebarOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50 }} />
-      )}
+      {sidebarOpen && <div onClick={() => setSidebarOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50 }} />}
 
       <div style={{ position: "fixed", top: 0, left: 0, height: "100%", width: 220, background: "#22222a", borderRight: "1px solid rgba(255,255,255,0.09)", display: "flex", flexDirection: "column", zIndex: 60, transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.22s ease" }}>
         <div style={{ padding: "24px 20px 18px", display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
@@ -227,6 +325,12 @@ export default function App() {
 
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
 
+        {actionFeedback && (
+          <div style={{ position: "fixed", bottom: 80, left: "50%", transform: "translateX(-50%)", background: "#2a2a34", border: "1px solid rgba(142,174,251,0.3)", borderRadius: 8, padding: "8px 16px", fontSize: 12, color: "#8eaefb", fontFamily: "monospace", zIndex: 300, whiteSpace: "nowrap" }}>
+            {actionFeedback}
+          </div>
+        )}
+
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
           <button onClick={() => setSidebarOpen(true)} style={{ background: "none", border: "none", cursor: "pointer", color: "#b0aca6", fontSize: 20, lineHeight: 1, flexShrink: 0 }}>&#9776;</button>
           <div style={{ fontFamily: "Georgia, serif", fontSize: 16, fontStyle: "italic", color: "#f2efe9" }}>
@@ -242,7 +346,7 @@ export default function App() {
                   <div style={{ fontFamily: "Georgia, serif", fontSize: 22, fontStyle: "italic" }}>{today.toLocaleDateString("en-US", { weekday: "long" })}</div>
                   <div style={{ fontSize: 11, color: "#706d68", marginTop: 3, fontFamily: "monospace" }}>{todayStr}</div>
                 </div>
-                <button onClick={generatePlan} disabled={planLoading} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer", opacity: planLoading ? 0.6 : 1, flexShrink: 0 }}>
+                <button onClick={() => generatePlan()} disabled={planLoading} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer", opacity: planLoading ? 0.6 : 1, flexShrink: 0 }}>
                   {planLoading ? "..." : "Generate"}
                 </button>
               </div>
@@ -334,7 +438,7 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  {h.streak > 0 && <div style={{ fontSize: 11, fontFamily: "monospace", color: "#edbe80", display: "flex", alignItems: "center", gap: 4 }}>&#9889;{h.streak}d</div>}
+                  {h.streak > 0 && <div style={{ fontSize: 11, fontFamily: "monospace", color: "#edbe80" }}>&#9889;{h.streak}d</div>}
                   <div onClick={() => {
                     if (navigator.vibrate) navigator.vibrate([15, 10, 25]);
                     setHabits((prev) => prev.map((x) => {
@@ -398,7 +502,7 @@ export default function App() {
           <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
             <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "16px 20px" }}>
               <div style={{ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", alignSelf: "flex-start", borderBottomLeftRadius: 3 }}>
-                Hey — I know your goals, tasks, habits, and patterns. Ask me anything about your day, what to focus on, or how to rebalance.
+                Hey — I know your goals, tasks, habits, and patterns. I can also update them directly — just tell me what to add, change, or check off.
               </div>
               {chatHistory.map((m, i) => (
                 <div key={i} style={{ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#22222a", border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)", borderBottomRightRadius: m.role === "user" ? 3 : 12, borderBottomLeftRadius: m.role === "user" ? 12 : 3 }}>{m.content}</div>
@@ -406,7 +510,7 @@ export default function App() {
               {chatLoading && <div style={{ fontSize: 12, color: "#706d68", fontFamily: "monospace", alignSelf: "flex-start" }}>thinking...</div>}
             </div>
             <div style={{ display: "flex", gap: 8, padding: "12px 20px 20px", borderTop: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
-              <input value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendChat(); }} placeholder="What's on your mind..." style={{ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 13, color: "#f2efe9", outline: "none" }} />
+              <input value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendChat(); }} placeholder="Add a goal, check off a task, ask anything..." style={{ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 13, color: "#f2efe9", outline: "none" }} />
               <button onClick={sendChat} disabled={chatLoading} style={{ background: "rgba(142,174,251,0.16)", border: "1px solid rgba(142,174,251,0.28)", borderRadius: 7, padding: "10px 16px", color: "#8eaefb", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>Send</button>
             </div>
           </div>
@@ -425,7 +529,7 @@ export default function App() {
           <Field label="Target timeframe"><input value={goalModal.deadline} onChange={(e) => setGoalModal((m) => ({ ...m, deadline: e.target.value }))} placeholder="e.g. Spring 2027" /></Field>
           <Field label="Priority">
             <div style={{ display: "flex", gap: 6 }}>
-              {[["front","Front burner"],["maint","Maintenance"],["back","Back burner"]].map(([val, label]) => (
+              {[["front","Front"],["maint","Maint"],["back","Back"]].map(([val, label]) => (
                 <button key={val} onClick={() => setGoalModal((m) => ({ ...m, p: val }))} style={{ flex: 1, padding: "8px 4px", fontSize: 11, fontFamily: "monospace", border: `1px solid ${goalModal.p === val ? "#8eaefb" : "rgba(255,255,255,0.09)"}`, borderRadius: 7, background: goalModal.p === val ? "rgba(142,174,251,0.16)" : "none", color: goalModal.p === val ? "#8eaefb" : "#706d68", cursor: "pointer" }}>{label}</button>
               ))}
             </div>
@@ -510,7 +614,7 @@ function PlanBlock({ block, onToggle, onSkip, onReschedule, skipCount = 0 }) {
       </div>
       <div style={{ flex: 1, padding: "14px 8px 14px 0" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-          <div style={{ fontSize: 11, fontFamily: "monospace", color: "#8eaefb", letterSpacing: "0.02em" }}>{block.time}{isRescheduled && block.newTime ? " -> " + block.newTime : ""}</div>
+          <div style={{ fontSize: 11, fontFamily: "monospace", color: "#8eaefb" }}>{block.time}{isRescheduled && block.newTime ? " -> " + block.newTime : ""}</div>
           <ImpDots imp={block.imp || 2} />
         </div>
         <div style={{ fontSize: 14, fontWeight: 500, color: block.done || isSkipped ? "#706d68" : "#f2efe9", textDecoration: block.done || isSkipped ? "line-through" : "none", marginBottom: 3 }}>{block.title}</div>
@@ -527,8 +631,8 @@ function PlanBlock({ block, onToggle, onSkip, onReschedule, skipCount = 0 }) {
           <button onClick={() => setMenuOpen((o) => !o)} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 15, padding: 4, borderRadius: 4 }}>...</button>
           {menuOpen && (
             <div style={{ position: "absolute", right: 6, top: 32, background: "#2a2a34", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 7, zIndex: 50, minWidth: 140, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
-              <button onClick={() => { onSkip(block.id); setMenuOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>Skip</button>
-              <button onClick={() => { onReschedule(block.id); setMenuOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>Reschedule</button>
+              <button onClick={() => { onSkip(block.id); setMenuOpen(false); }} style={{ padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>Skip</button>
+              <button onClick={() => { onReschedule(block.id); setMenuOpen(false); }} style={{ padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>Reschedule</button>
             </div>
           )}
         </div>
