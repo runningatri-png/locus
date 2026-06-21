@@ -70,6 +70,7 @@ function ImpDots({ imp, size = 7 }) {
 
 export default function App() {
   const [tab, setTab] = useState("today");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [goals, setGoals] = useState(() => load(STORAGE_KEYS.goals, []));
   const [tasks, setTasks] = useState(() => load(STORAGE_KEYS.tasks, []));
   const [habits, setHabits] = useState(() => load(STORAGE_KEYS.habits, []));
@@ -112,7 +113,7 @@ export default function App() {
     const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns);
     try {
       const text = await callClaude(
-        `You are a personal day planner for Locus. ${ctx}\n\nGenerate a realistic time-blocked day plan. Rules:\n- Front burner goals get the most time\n- Maintenance goals get shorter blocks\n- Back burner only if space\n- Pending tasks get specific slots by importance\n- Habits are constraints, weave them in\n- Avoid blocks that match skip patterns — restructure timing instead\n- Include flex time\n- Respond ONLY with JSON array, no markdown, no explanation. Format: [{"time":"7:00 – 9:00 am","title":"Block title","desc":"Description","imp":3}]. imp is 1-3.`,
+        `You are a personal day planner for Locus. ${ctx}\n\nGenerate a realistic time-blocked day plan. Rules:\n- Front burner goals get the most time\n- Maintenance goals get shorter blocks\n- Back burner only if space\n- Pending tasks get specific slots by importance\n- Habits are constraints, weave them in\n- Avoid blocks that match skip patterns — restructure timing instead\n- Include flex time\n- Respond ONLY with a JSON array, no markdown, no explanation. Format: [{"time":"7:00 - 9:00 am","title":"Block title","desc":"Description","imp":3}]. imp is 1-3.`,
         [{ role: "user", content: "Build my plan for today." }]
       );
       const clean = text.replace(/```json|```/g, "").trim();
@@ -151,7 +152,7 @@ export default function App() {
       prev.map((b) => {
         if (b.id !== rescheduleModal) return b;
         setSkipPatterns((sp) => ({ ...sp, [b.title]: (sp[b.title] || 0) + 1 }));
-        addHistory("reschedule", `Rescheduled: ${b.title}${rescheduleTime ? " → " + rescheduleTime : ""}${rescheduleReason ? " (" + rescheduleReason + ")" : ""}`);
+        addHistory("reschedule", `Rescheduled: ${b.title}${rescheduleTime ? " -> " + rescheduleTime : ""}${rescheduleReason ? " (" + rescheduleReason + ")" : ""}`);
         return { ...b, status: "rescheduled", newTime: rescheduleTime, conflict: rescheduleReason };
       })
     );
@@ -185,25 +186,34 @@ export default function App() {
   const pendingPlanBlocks = planBlocks.filter((b) => !b.done && b.status !== "skipped");
   const progress = planBlocks.length ? Math.round((planBlocks.filter((b) => b.done).length / planBlocks.length) * 100) : 0;
 
+  const navItems = [
+    { id: "today", label: "Today" },
+    { id: "chat", label: "Chat" },
+    { id: "goals", label: "Goals", badge: goals.length },
+    { id: "tasks", label: "Tasks", badge: tasks.filter((t) => !t.done).length },
+    { id: "habits", label: "Habits", badge: habits.length },
+    { id: "ideas", label: "Ideas", badge: ideas.length },
+    { id: "history", label: "History" },
+  ];
+
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "#1a1a20", color: "#f2efe9", fontFamily: "'Geist', 'Inter', sans-serif", fontSize: 14 }}>
-      {/* SIDEBAR */}
-      <div style={{ width: 220, flexShrink: 0, background: "#22222a", borderRight: "1px solid rgba(255,255,255,0.09)", display: "flex", flexDirection: "column" }}>
-        <div style={{ padding: "24px 20px 18px" }}>
-          <div style={{ fontFamily: "Georgia, serif", fontSize: 21, fontStyle: "italic", color: "#f2efe9" }}>Locus</div>
-          <div style={{ fontSize: 11, color: "#706d68", marginTop: 3 }}>where focus lives</div>
+
+      {sidebarOpen && (
+        <div onClick={() => setSidebarOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50 }} />
+      )}
+
+      <div style={{ position: "fixed", top: 0, left: 0, height: "100%", width: 220, background: "#22222a", borderRight: "1px solid rgba(255,255,255,0.09)", display: "flex", flexDirection: "column", zIndex: 60, transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.22s ease" }}>
+        <div style={{ padding: "24px 20px 18px", display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontFamily: "Georgia, serif", fontSize: 21, fontStyle: "italic", color: "#f2efe9" }}>Locus</div>
+            <div style={{ fontSize: 11, color: "#706d68", marginTop: 3 }}>where focus lives</div>
+          </div>
+          <button onClick={() => setSidebarOpen(false)} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 18, lineHeight: 1, marginTop: 2 }}>x</button>
         </div>
         <nav style={{ padding: "4px 10px", flex: 1 }}>
-          {[
-            { id: "today", label: "Today" },
-            { id: "chat", label: "Chat" },
-            { id: "goals", label: "Goals", badge: goals.length },
-            { id: "tasks", label: "Tasks", badge: tasks.filter((t) => !t.done).length },
-            { id: "habits", label: "Habits", badge: habits.length },
-            { id: "ideas", label: "Ideas", badge: ideas.length },
-            { id: "history", label: "History" },
-          ].map((item) => (
-            <button key={item.id} onClick={() => setTab(item.id)} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 7, cursor: "pointer", color: tab === item.id ? "#8eaefb" : "#b0aca6", background: tab === item.id ? "rgba(142,174,251,0.16)" : "none", border: "none", width: "100%", textAlign: "left", fontSize: 13, marginBottom: 1, fontWeight: tab === item.id ? 500 : 400 }}>
+          {navItems.map((item) => (
+            <button key={item.id} onClick={() => { setTab(item.id); setSidebarOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: 7, cursor: "pointer", color: tab === item.id ? "#8eaefb" : "#b0aca6", background: tab === item.id ? "rgba(142,174,251,0.16)" : "none", border: "none", width: "100%", textAlign: "left", fontSize: 13, marginBottom: 1, fontWeight: tab === item.id ? 500 : 400 }}>
               {item.label}
               {item.badge !== undefined && <span style={{ marginLeft: "auto", fontSize: 10, background: tab === item.id ? "rgba(142,174,251,0.28)" : "#32323e", color: tab === item.id ? "#8eaefb" : "#706d68", padding: "1px 6px", borderRadius: 99 }}>{item.badge}</span>}
             </button>
@@ -215,23 +225,28 @@ export default function App() {
         </div>
       </div>
 
-      {/* MAIN */}
-      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
 
-        {/* TODAY */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
+          <button onClick={() => setSidebarOpen(true)} style={{ background: "none", border: "none", cursor: "pointer", color: "#b0aca6", fontSize: 20, lineHeight: 1, flexShrink: 0 }}>&#9776;</button>
+          <div style={{ fontFamily: "Georgia, serif", fontSize: 16, fontStyle: "italic", color: "#f2efe9" }}>
+            {navItems.find(n => n.id === tab)?.label}
+          </div>
+        </div>
+
         {tab === "today" && (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ padding: "24px 36px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            <div style={{ padding: "16px 20px 14px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
               <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
                 <div>
-                  <div style={{ fontFamily: "Georgia, serif", fontSize: 26, fontStyle: "italic" }}>{today.toLocaleDateString("en-US", { weekday: "long" })}</div>
-                  <div style={{ fontSize: 11, color: "#706d68", marginTop: 4, fontFamily: "monospace" }}>{todayStr}</div>
+                  <div style={{ fontFamily: "Georgia, serif", fontSize: 22, fontStyle: "italic" }}>{today.toLocaleDateString("en-US", { weekday: "long" })}</div>
+                  <div style={{ fontSize: 11, color: "#706d68", marginTop: 3, fontFamily: "monospace" }}>{todayStr}</div>
                 </div>
-                <button onClick={generatePlan} disabled={planLoading} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "9px 18px", fontSize: 12, fontWeight: 500, cursor: "pointer", opacity: planLoading ? 0.6 : 1 }}>
-                  {planLoading ? "Generating..." : "↗ Generate plan"}
+                <button onClick={generatePlan} disabled={planLoading} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer", opacity: planLoading ? 0.6 : 1, flexShrink: 0 }}>
+                  {planLoading ? "..." : "Generate"}
                 </button>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
                 <div style={{ flex: 1, height: 3, background: "#32323e", borderRadius: 99, overflow: "hidden" }}>
                   <div style={{ height: "100%", width: progress + "%", background: "#8eaefb", borderRadius: 99, transition: "width 0.4s" }} />
                 </div>
@@ -239,10 +254,10 @@ export default function App() {
               </div>
             </div>
             <div style={{ flex: 1, overflowY: "auto" }}>
-              {!planBlocks.length && <div style={{ padding: "48px 36px", color: "#706d68", fontFamily: "monospace", fontSize: 12, textAlign: "center" }}>No plan yet — hit "Generate plan" to build your day.</div>}
+              {!planBlocks.length && <div style={{ padding: "48px 20px", color: "#706d68", fontFamily: "monospace", fontSize: 12, textAlign: "center" }}>No plan yet. Hit Generate to build your day.</div>}
               {donePlanBlocks.map((b) => <PlanBlock key={b.id} block={b} onToggle={toggleBlock} onSkip={skipBlock} onReschedule={setRescheduleModal} />)}
               {donePlanBlocks.length > 0 && pendingPlanBlocks.length > 0 && (
-                <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 20px 7px 50px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 16px 7px 48px" }}>
                   <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" }} />
                   <div style={{ fontSize: 10, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.1em" }}>Now</div>
                   <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" }} />
@@ -253,26 +268,24 @@ export default function App() {
           </div>
         )}
 
-        {/* GOALS */}
         {tab === "goals" && (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ padding: "24px 36px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ fontFamily: "Georgia, serif", fontSize: 26, fontStyle: "italic" }}>Goals</div>
-              <button onClick={() => setGoalModal({ name: "", area: "Fitness", desc: "", deadline: "", p: "front" })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "9px 18px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add goal</button>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" }}>
+              <button onClick={() => setGoalModal({ name: "", area: "Fitness", desc: "", deadline: "", p: "front" })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add goal</button>
             </div>
-            <div style={{ flex: 1, overflowY: "auto", padding: "20px 36px" }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               {!goals.length && <div style={{ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" }}>no goals yet</div>}
               {[...goals].sort((a, b) => ["front","maint","back"].indexOf(a.p) - ["front","maint","back"].indexOf(b.p)).map((g) => (
-                <div key={g.id} onClick={() => setGoalModal(g)} style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderLeft: `3px solid ${g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68"}`, borderRadius: 12, padding: "16px 18px", marginBottom: 10, cursor: "pointer" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginLeft: 6 }}>
+                <div key={g.id} onClick={() => setGoalModal(g)} style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderLeft: `3px solid ${g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68"}`, borderRadius: 12, padding: "14px 16px", marginBottom: 10, cursor: "pointer" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginLeft: 4 }}>
                     <div style={{ fontSize: 14, fontWeight: 500 }}>{g.name}</div>
-                    <div style={{ fontSize: 10, fontFamily: "monospace", color: "#706d68", background: "#32323e", padding: "3px 8px", borderRadius: 99 }}>{g.area}</div>
+                    <div style={{ fontSize: 10, fontFamily: "monospace", color: "#706d68", background: "#32323e", padding: "3px 8px", borderRadius: 99, flexShrink: 0, marginLeft: 8 }}>{g.area}</div>
                   </div>
-                  {g.desc && <div style={{ fontSize: 12.5, color: "#b0aca6", marginTop: 7, marginLeft: 6, lineHeight: 1.6 }}>{g.desc}</div>}
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, marginLeft: 6 }}>
+                  {g.desc && <div style={{ fontSize: 12.5, color: "#b0aca6", marginTop: 6, marginLeft: 4, lineHeight: 1.6 }}>{g.desc}</div>}
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10, marginLeft: 4 }}>
                     <div style={{ fontSize: 11, fontFamily: "monospace", color: g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68" }}>{g.p === "front" ? "front burner" : g.p === "maint" ? "maintenance" : "back burner"}</div>
                     {g.deadline && <div style={{ fontSize: 11, fontFamily: "monospace", color: "#706d68", marginLeft: "auto" }}>{g.deadline}</div>}
-                    <button onClick={(e) => { e.stopPropagation(); setGoals((prev) => prev.filter((x) => x.id !== g.id)); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", marginLeft: g.deadline ? 0 : "auto", fontSize: 12 }}>✕</button>
+                    <button onClick={(e) => { e.stopPropagation(); setGoals((prev) => prev.filter((x) => x.id !== g.id)); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", marginLeft: g.deadline ? 0 : "auto", fontSize: 12 }}>x</button>
                   </div>
                 </div>
               ))}
@@ -280,17 +293,15 @@ export default function App() {
           </div>
         )}
 
-        {/* TASKS */}
         {tab === "tasks" && (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ padding: "24px 36px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ fontFamily: "Georgia, serif", fontSize: 26, fontStyle: "italic" }}>Tasks</div>
-              <button onClick={() => setTaskModal({ name: "", due: "", goal: "", desc: "", imp: 2, done: false })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "9px 18px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add task</button>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" }}>
+              <button onClick={() => setTaskModal({ name: "", due: "", goal: "", desc: "", imp: 2, done: false })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add task</button>
             </div>
-            <div style={{ flex: 1, overflowY: "auto", padding: "20px 36px" }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               <div style={{ fontSize: 10, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Pending</div>
               {tasks.filter((t) => !t.done).sort((a, b) => (b.imp || 1) - (a.imp || 1)).map((t) => (
-                <TaskCard key={t.id} task={t} goals={goals} onToggle={(id) => { setTasks((prev) => prev.map((x) => x.id === id ? { ...x, done: !x.done } : x)); }} onEdit={setTaskModal} onDelete={(id) => setTasks((prev) => prev.filter((x) => x.id !== id))} />
+                <TaskCard key={t.id} task={t} goals={goals} onToggle={(id) => setTasks((prev) => prev.map((x) => x.id === id ? { ...x, done: !x.done } : x))} onEdit={setTaskModal} onDelete={(id) => setTasks((prev) => prev.filter((x) => x.id !== id))} />
               ))}
               {!tasks.filter((t) => !t.done).length && <div style={{ color: "#706d68", fontSize: 12, fontFamily: "monospace", padding: "12px 0" }}>no pending tasks</div>}
               <div style={{ fontSize: 10, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.1em", margin: "20px 0 8px" }}>Completed</div>
@@ -301,14 +312,12 @@ export default function App() {
           </div>
         )}
 
-        {/* HABITS */}
         {tab === "habits" && (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ padding: "24px 36px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ fontFamily: "Georgia, serif", fontSize: 26, fontStyle: "italic" }}>Habits</div>
-              <button onClick={() => setHabitModal({ name: "", freq: "daily", note: "" })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "9px 18px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add habit</button>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" }}>
+              <button onClick={() => setHabitModal({ name: "", freq: "daily", note: "" })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add habit</button>
             </div>
-            <div style={{ flex: 1, overflowY: "auto", padding: "20px 36px" }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               <div style={{ background: "#2a2a34", borderRadius: 7, padding: "10px 14px", fontSize: 11, color: "#706d68", lineHeight: 1.6, marginBottom: 14, borderLeft: "3px solid rgba(237,190,128,0.3)" }}>Not tasks — these reset daily and shape how Claude builds your plan. Tick each day to build your streak.</div>
               {!habits.length && <div style={{ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" }}>no habits yet</div>}
               {habits.map((h) => (
@@ -325,7 +334,7 @@ export default function App() {
                       ))}
                     </div>
                   </div>
-                  {h.streak > 0 && <div style={{ fontSize: 11, fontFamily: "monospace", color: "#edbe80", display: "flex", alignItems: "center", gap: 4 }}>⚡{h.streak}d</div>}
+                  {h.streak > 0 && <div style={{ fontSize: 11, fontFamily: "monospace", color: "#edbe80", display: "flex", alignItems: "center", gap: 4 }}>&#9889;{h.streak}d</div>}
                   <div onClick={() => {
                     if (navigator.vibrate) navigator.vibrate([15, 10, 25]);
                     setHabits((prev) => prev.map((x) => {
@@ -337,21 +346,16 @@ export default function App() {
                   }} style={{ width: 28, height: 28, border: `1.5px solid ${h.tickedToday ? "#81c995" : "rgba(255,255,255,0.22)"}`, borderRadius: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: h.tickedToday ? "rgba(129,201,149,0.12)" : "none", color: "#81c995", fontSize: 13 }}>
                     {h.tickedToday ? "✓" : ""}
                   </div>
-                  <button onClick={() => setHabits((prev) => prev.filter((x) => x.id !== h.id))} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}>✕</button>
+                  <button onClick={() => setHabits((prev) => prev.filter((x) => x.id !== h.id))} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}>x</button>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        {/* IDEAS */}
         {tab === "ideas" && (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ padding: "24px 36px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)" }}>
-              <div style={{ fontFamily: "Georgia, serif", fontSize: 26, fontStyle: "italic" }}>Ideas</div>
-              <div style={{ fontSize: 11, color: "#706d68", marginTop: 4, fontFamily: "monospace" }}>parking lot — no pressure, no deadlines</div>
-            </div>
-            <div style={{ flex: 1, overflowY: "auto", padding: "20px 36px" }}>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
                 <input value={ideaInput} onChange={(e) => setIdeaInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && ideaInput.trim()) { setIdeas((prev) => [...prev, { id: Date.now().toString(), t: ideaInput.trim() }]); setIdeaInput(""); }}} placeholder="Drop an idea, no commitment..." style={{ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 13, color: "#f2efe9", outline: "none" }} />
                 <button onClick={() => { if (ideaInput.trim()) { setIdeas((prev) => [...prev, { id: Date.now().toString(), t: ideaInput.trim() }]); setIdeaInput(""); }}} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "10px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>Add</button>
@@ -360,27 +364,22 @@ export default function App() {
                 <div key={i.id} style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 12, padding: "11px 15px", marginBottom: 7, display: "flex", alignItems: "center", gap: 10 }}>
                   <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#b8a0fc", opacity: 0.8, flexShrink: 0 }} />
                   <div style={{ flex: 1, fontSize: 13, color: "#b0aca6" }}>{i.t}</div>
-                  <button onClick={() => setIdeas((prev) => prev.filter((x) => x.id !== i.id))} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}>✕</button>
+                  <button onClick={() => setIdeas((prev) => prev.filter((x) => x.id !== i.id))} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}>x</button>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        {/* HISTORY */}
         {tab === "history" && (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ padding: "24px 36px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)" }}>
-              <div style={{ fontFamily: "Georgia, serif", fontSize: 26, fontStyle: "italic" }}>History</div>
-              <div style={{ fontSize: 11, color: "#706d68", marginTop: 4, fontFamily: "monospace" }}>your receipts — proof you're moving</div>
-            </div>
-            <div style={{ flex: 1, overflowY: "auto", padding: "20px 36px" }}>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               {!history.length && <div style={{ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" }}>no history yet</div>}
               {history.map((day, di) => (
                 <div key={di} style={{ marginBottom: 22 }}>
                   <div style={{ fontSize: 11, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 9 }}>{day.date}</div>
                   {day.entries.map((e, ei) => {
-                    const meta = { task: { bg: "rgba(142,174,251,0.16)", color: "#8eaefb", icon: "✓" }, habit: { bg: "rgba(237,190,128,0.13)", color: "#edbe80", icon: "⚡" }, goal: { bg: "rgba(184,160,252,0.13)", color: "#b8a0fc", icon: "◎" }, skip: { bg: "#32323e", color: "#706d68", icon: "—" }, reschedule: { bg: "rgba(240,192,96,0.12)", color: "#f0c060", icon: "↻" } }[e.type] || { bg: "#32323e", color: "#706d68", icon: "•" };
+                    const meta = { task: { bg: "rgba(142,174,251,0.16)", color: "#8eaefb", icon: "✓" }, habit: { bg: "rgba(237,190,128,0.13)", color: "#edbe80", icon: "!" }, goal: { bg: "rgba(184,160,252,0.13)", color: "#b8a0fc", icon: "o" }, skip: { bg: "#32323e", color: "#706d68", icon: "-" }, reschedule: { bg: "rgba(240,192,96,0.12)", color: "#f0c060", icon: "r" } }[e.type] || { bg: "#32323e", color: "#706d68", icon: "." };
                     return (
                       <div key={ei} style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "9px 13px", marginBottom: 5, display: "flex", alignItems: "center", gap: 9 }}>
                         <div style={{ width: 20, height: 20, borderRadius: "50%", background: meta.bg, color: meta.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, flexShrink: 0 }}>{meta.icon}</div>
@@ -395,31 +394,25 @@ export default function App() {
           </div>
         )}
 
-        {/* CHAT */}
         {tab === "chat" && (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-            <div style={{ padding: "24px 36px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)" }}>
-              <div style={{ fontFamily: "Georgia, serif", fontSize: 26, fontStyle: "italic" }}>Chat</div>
-              <div style={{ fontSize: 11, color: "#706d68", marginTop: 4, fontFamily: "monospace" }}>think through your day with claude</div>
-            </div>
-            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "18px 36px" }}>
-              <div style={{ maxWidth: "75%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", alignSelf: "flex-start", borderBottomLeftRadius: 3 }}>
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "16px 20px" }}>
+              <div style={{ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", alignSelf: "flex-start", borderBottomLeftRadius: 3 }}>
                 Hey — I know your goals, tasks, habits, and patterns. Ask me anything about your day, what to focus on, or how to rebalance.
               </div>
               {chatHistory.map((m, i) => (
-                <div key={i} style={{ maxWidth: "75%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#22222a", border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)", borderBottomRightRadius: m.role === "user" ? 3 : 12, borderBottomLeftRadius: m.role === "user" ? 12 : 3 }}>{m.content}</div>
+                <div key={i} style={{ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#22222a", border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)", borderBottomRightRadius: m.role === "user" ? 3 : 12, borderBottomLeftRadius: m.role === "user" ? 12 : 3 }}>{m.content}</div>
               ))}
               {chatLoading && <div style={{ fontSize: 12, color: "#706d68", fontFamily: "monospace", alignSelf: "flex-start" }}>thinking...</div>}
             </div>
-            <div style={{ display: "flex", gap: 8, padding: "12px 36px 22px", borderTop: "1px solid rgba(255,255,255,0.09)" }}>
+            <div style={{ display: "flex", gap: 8, padding: "12px 20px 20px", borderTop: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
               <input value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendChat(); }} placeholder="What's on your mind..." style={{ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 13, color: "#f2efe9", outline: "none" }} />
-              <button onClick={sendChat} disabled={chatLoading} style={{ background: "rgba(142,174,251,0.16)", border: "1px solid rgba(142,174,251,0.28)", borderRadius: 7, padding: "10px 18px", color: "#8eaefb", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>Send</button>
+              <button onClick={sendChat} disabled={chatLoading} style={{ background: "rgba(142,174,251,0.16)", border: "1px solid rgba(142,174,251,0.28)", borderRadius: 7, padding: "10px 16px", color: "#8eaefb", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>Send</button>
             </div>
           </div>
         )}
       </div>
 
-      {/* GOAL MODAL */}
       {goalModal && (
         <Modal onClose={() => setGoalModal(null)} title={goalModal.id ? "Edit goal" : "Add goal"}>
           <Field label="Goal name"><input value={goalModal.name} onChange={(e) => setGoalModal((m) => ({ ...m, name: e.target.value }))} placeholder="e.g. Land a fintech role" /></Field>
@@ -432,8 +425,8 @@ export default function App() {
           <Field label="Target timeframe"><input value={goalModal.deadline} onChange={(e) => setGoalModal((m) => ({ ...m, deadline: e.target.value }))} placeholder="e.g. Spring 2027" /></Field>
           <Field label="Priority">
             <div style={{ display: "flex", gap: 6 }}>
-              {[["front","🔥 Front"],["maint","🔄 Maint"],["back","💤 Back"]].map(([val, label]) => (
-                <button key={val} onClick={() => setGoalModal((m) => ({ ...m, p: val }))} style={{ flex: 1, padding: "8px 6px", fontSize: 11, fontFamily: "monospace", border: `1px solid ${goalModal.p === val ? "#8eaefb" : "rgba(255,255,255,0.09)"}`, borderRadius: 7, background: goalModal.p === val ? "rgba(142,174,251,0.16)" : "none", color: goalModal.p === val ? "#8eaefb" : "#706d68", cursor: "pointer" }}>{label}</button>
+              {[["front","Front burner"],["maint","Maintenance"],["back","Back burner"]].map(([val, label]) => (
+                <button key={val} onClick={() => setGoalModal((m) => ({ ...m, p: val }))} style={{ flex: 1, padding: "8px 4px", fontSize: 11, fontFamily: "monospace", border: `1px solid ${goalModal.p === val ? "#8eaefb" : "rgba(255,255,255,0.09)"}`, borderRadius: 7, background: goalModal.p === val ? "rgba(142,174,251,0.16)" : "none", color: goalModal.p === val ? "#8eaefb" : "#706d68", cursor: "pointer" }}>{label}</button>
               ))}
             </div>
           </Field>
@@ -446,14 +439,13 @@ export default function App() {
         </Modal>
       )}
 
-      {/* TASK MODAL */}
       {taskModal && (
         <Modal onClose={() => setTaskModal(null)} title={taskModal.id ? "Edit task" : "Add task"}>
           <Field label="Task name"><input value={taskModal.name} onChange={(e) => setTaskModal((m) => ({ ...m, name: e.target.value }))} placeholder="e.g. Register for fall classes" /></Field>
           <Field label="Due date"><input value={taskModal.due} onChange={(e) => setTaskModal((m) => ({ ...m, due: e.target.value }))} placeholder="e.g. June 15" /></Field>
           <Field label="Linked goal">
             <select value={taskModal.goal} onChange={(e) => setTaskModal((m) => ({ ...m, goal: e.target.value }))}>
-              <option value="">— none —</option>
+              <option value="">none</option>
               {goals.map((g) => <option key={g.id} value={g.name}>{g.name}</option>)}
             </select>
           </Field>
@@ -473,7 +465,6 @@ export default function App() {
         </Modal>
       )}
 
-      {/* HABIT MODAL */}
       {habitModal && (
         <Modal onClose={() => setHabitModal(null)} title={habitModal.id ? "Edit habit" : "Add habit"}>
           <Field label="Habit name"><input value={habitModal.name} onChange={(e) => setHabitModal((m) => ({ ...m, name: e.target.value }))} placeholder="e.g. 200g protein" /></Field>
@@ -481,7 +472,7 @@ export default function App() {
             <select value={habitModal.freq} onChange={(e) => setHabitModal((m) => ({ ...m, freq: e.target.value }))}>
               <option value="daily">Every day</option>
               <option value="weekdays">Weekdays only</option>
-              <option value="3x">3× per week</option>
+              <option value="3x">3x per week</option>
               <option value="weekly">Once a week</option>
             </select>
           </Field>
@@ -495,7 +486,6 @@ export default function App() {
         </Modal>
       )}
 
-      {/* RESCHEDULE MODAL */}
       {rescheduleModal && (
         <Modal onClose={() => setRescheduleModal(null)} title="Reschedule block">
           <Field label="What came up?"><textarea value={rescheduleReason} onChange={(e) => setRescheduleReason(e.target.value)} placeholder="e.g. Meeting ran long..." /></Field>
@@ -512,15 +502,15 @@ function PlanBlock({ block, onToggle, onSkip, onReschedule, skipCount = 0 }) {
   const isSkipped = block.status === "skipped";
   const isRescheduled = block.status === "rescheduled";
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", borderBottom: "1px solid rgba(255,255,255,0.09)", opacity: block.done || isSkipped ? 0.32 : 1, background: block.done || isSkipped ? "transparent" : undefined, position: "relative" }}>
-      <div style={{ width: 50, flexShrink: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 19 }}>
+    <div style={{ display: "flex", alignItems: "flex-start", borderBottom: "1px solid rgba(255,255,255,0.09)", opacity: block.done || isSkipped ? 0.32 : 1, position: "relative" }}>
+      <div style={{ width: 48, flexShrink: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 18 }}>
         <div onClick={() => !isSkipped && onToggle(block.id)} style={{ width: 18, height: 18, border: `1.5px solid ${block.done ? "#81c995" : "rgba(255,255,255,0.22)"}`, borderRadius: "50%", cursor: isSkipped ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: block.done ? "#81c995" : "none", flexShrink: 0 }}>
           {block.done && <div style={{ width: 8, height: 5, borderLeft: "2px solid #0e1a11", borderBottom: "2px solid #0e1a11", transform: "rotate(-45deg) translateY(-1px)" }} />}
         </div>
       </div>
-      <div style={{ flex: 1, padding: "15px 6px 15px 0" }}>
+      <div style={{ flex: 1, padding: "14px 8px 14px 0" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-          <div style={{ fontSize: 11, fontFamily: "monospace", color: "#8eaefb", letterSpacing: "0.02em" }}>{block.time}{isRescheduled && block.newTime ? " → " + block.newTime : ""}</div>
+          <div style={{ fontSize: 11, fontFamily: "monospace", color: "#8eaefb", letterSpacing: "0.02em" }}>{block.time}{isRescheduled && block.newTime ? " -> " + block.newTime : ""}</div>
           <ImpDots imp={block.imp || 2} />
         </div>
         <div style={{ fontSize: 14, fontWeight: 500, color: block.done || isSkipped ? "#706d68" : "#f2efe9", textDecoration: block.done || isSkipped ? "line-through" : "none", marginBottom: 3 }}>{block.title}</div>
@@ -529,16 +519,16 @@ function PlanBlock({ block, onToggle, onSkip, onReschedule, skipCount = 0 }) {
           {block.done && <span style={{ fontSize: 10, fontFamily: "monospace", color: "#81c995", background: "rgba(129,201,149,0.12)", padding: "2px 8px", borderRadius: 99 }}>completed</span>}
           {isSkipped && <span style={{ fontSize: 10, fontFamily: "monospace", color: "#706d68", background: "#32323e", padding: "2px 8px", borderRadius: 99 }}>skipped</span>}
           {isRescheduled && !block.done && <span style={{ fontSize: 10, fontFamily: "monospace", color: "#f0c060", background: "rgba(240,192,96,0.12)", padding: "2px 8px", borderRadius: 99 }}>rescheduled</span>}
-          {skipCount >= 2 && !block.done && !isSkipped && <span style={{ fontSize: 10, fontFamily: "monospace", color: "#f28b82", background: "rgba(242,139,130,0.12)", padding: "2px 8px", borderRadius: 99 }}>skipped {skipCount}× recently</span>}
+          {skipCount >= 2 && !block.done && !isSkipped && <span style={{ fontSize: 10, fontFamily: "monospace", color: "#f28b82", background: "rgba(242,139,130,0.12)", padding: "2px 8px", borderRadius: 99 }}>skipped {skipCount}x recently</span>}
         </div>
       </div>
       {!block.done && !isSkipped && (
-        <div style={{ width: 34, flexShrink: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 14, position: "relative" }}>
-          <button onClick={() => setMenuOpen((o) => !o)} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 15, padding: 4, borderRadius: 4 }}>···</button>
+        <div style={{ width: 34, flexShrink: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 12, position: "relative" }}>
+          <button onClick={() => setMenuOpen((o) => !o)} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 15, padding: 4, borderRadius: 4 }}>...</button>
           {menuOpen && (
-            <div style={{ position: "absolute", right: 6, top: 34, background: "#2a2a34", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 7, zIndex: 50, minWidth: 150, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
-              <button onClick={() => { onSkip(block.id); setMenuOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>✕ Skip</button>
-              <button onClick={() => { onReschedule(block.id); setMenuOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>↻ Reschedule</button>
+            <div style={{ position: "absolute", right: 6, top: 32, background: "#2a2a34", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 7, zIndex: 50, minWidth: 140, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+              <button onClick={() => { onSkip(block.id); setMenuOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>Skip</button>
+              <button onClick={() => { onReschedule(block.id); setMenuOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>Reschedule</button>
             </div>
           )}
         </div>
@@ -556,15 +546,15 @@ function TaskCard({ task, goals, onToggle, onEdit, onDelete }) {
       <div style={{ flex: 1 }}>
         <div style={{ fontSize: 13, color: "#f2efe9", textDecoration: task.done ? "line-through" : "none" }}>{task.name}</div>
         {(task.due || task.goal) && (
-          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+          <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
             {task.due && <span style={{ fontSize: 11, fontFamily: "monospace", color: "#706d68" }}>Due: {task.due}</span>}
-            {task.goal && <span style={{ fontSize: 11, fontFamily: "monospace", color: "#706d68" }}>↳ {task.goal}</span>}
+            {task.goal && <span style={{ fontSize: 11, fontFamily: "monospace", color: "#706d68" }}>Goal: {task.goal}</span>}
           </div>
         )}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <ImpDots imp={task.imp || 1} />
-        <button onClick={(e) => { e.stopPropagation(); onDelete(task.id); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}>✕</button>
+        <button onClick={(e) => { e.stopPropagation(); onDelete(task.id); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}>x</button>
       </div>
     </div>
   );
@@ -572,8 +562,8 @@ function TaskCard({ task, goals, onToggle, onEdit, onDelete }) {
 
 function Modal({ children, onClose, title }) {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, backdropFilter: "blur(2px)" }} onClick={onClose}>
-      <div style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 12, padding: 26, width: 430, maxWidth: "calc(100vw - 32px)" }} onClick={(e) => e.stopPropagation()}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, backdropFilter: "blur(2px)", padding: "0 16px" }} onClick={onClose}>
+      <div style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 12, padding: 24, width: "100%", maxWidth: 420 }} onClick={(e) => e.stopPropagation()}>
         <div style={{ fontFamily: "Georgia, serif", fontSize: 18, fontStyle: "italic", color: "#f2efe9", marginBottom: 18 }}>{title}</div>
         {children}
       </div>
