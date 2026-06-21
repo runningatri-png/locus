@@ -108,4 +108,7 @@ code {
   line-height: 135%;
   padding: 4px 8px;
   background: var(--code-bg);
+  input, textarea, select {
+  font-size: max(16px, 1em) !important;
+}
 }
