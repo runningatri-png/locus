@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import "./App.css";
 
 const STORAGE_KEYS = {
@@ -59,7 +59,7 @@ function ImpDots({ imp, size = 7 }) {
 }
 
 export default function App() {
-  const [tab, setTab] = useState("today");
+  const [tab, setTab] = useState("chat");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [goals, setGoals] = useState(() => load(STORAGE_KEYS.goals, []));
   const [tasks, setTasks] = useState(() => load(STORAGE_KEYS.tasks, []));
@@ -79,7 +79,8 @@ export default function App() {
   const [rescheduleReason, setRescheduleReason] = useState("");
   const [rescheduleTime, setRescheduleTime] = useState("");
   const [ideaInput, setIdeaInput] = useState("");
-  const [actionFeedback, setActionFeedback] = useState("");
+  const [toasts, setToasts] = useState([]);
+  const chatBottomRef = useRef(null);
 
   useEffect(() => { save(STORAGE_KEYS.goals, goals); }, [goals]);
   useEffect(() => { save(STORAGE_KEYS.tasks, tasks); }, [tasks]);
@@ -88,6 +89,13 @@ export default function App() {
   useEffect(() => { save(STORAGE_KEYS.plan, planBlocks); }, [planBlocks]);
   useEffect(() => { save(STORAGE_KEYS.history, history); }, [history]);
   useEffect(() => { save(STORAGE_KEYS.skipPatterns, skipPatterns); }, [skipPatterns]);
+  useEffect(() => { chatBottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatHistory, chatLoading]);
+
+  const addToast = (msg) => {
+    const id = Date.now();
+    setToasts((p) => [...p, { id, msg }]);
+    setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 3000);
+  };
 
   const addHistory = (type, text) => {
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
@@ -99,77 +107,118 @@ export default function App() {
     });
   };
 
-  const applyAction = (action, goalsSnap, tasksSnap, habitsSnap, ideasSnap) => {
-    if (!action || !action.type) return { goalsSnap, tasksSnap, habitsSnap, ideasSnap };
-    let feedback = "";
-    switch (action.type) {
-      case "add_goal": {
-        const g = { id: Date.now().toString(), name: action.name, area: action.area || "Other", desc: action.desc || "", deadline: action.deadline || "", p: action.priority || "maint" };
-        goalsSnap = [...goalsSnap, g];
-        feedback = `Added goal: ${g.name}`;
-        break;
-      }
-      case "edit_goal": {
-        goalsSnap = goalsSnap.map((g) => g.id === action.id ? { ...g, ...action.updates } : g);
-        feedback = `Updated goal`;
-        break;
-      }
-      case "delete_goal": {
-        goalsSnap = goalsSnap.filter((g) => g.id !== action.id);
-        feedback = `Deleted goal`;
-        break;
-      }
-      case "add_task": {
-        const t = { id: Date.now().toString(), name: action.name, due: action.due || "", goal: action.goal || "", desc: "", imp: action.importance || 2, done: false };
-        tasksSnap = [...tasksSnap, t];
-        feedback = `Added task: ${t.name}`;
-        break;
-      }
-      case "complete_task": {
-        tasksSnap = tasksSnap.map((t) => t.id === action.id || t.name.toLowerCase().includes((action.name || "").toLowerCase()) ? { ...t, done: true } : t);
-        feedback = `Marked task complete`;
-        break;
-      }
-      case "delete_task": {
-        tasksSnap = tasksSnap.filter((t) => t.id !== action.id);
-        feedback = `Deleted task`;
-        break;
-      }
-      case "add_habit": {
-        const h = { id: Date.now().toString(), name: action.name, freq: action.freq || "daily", note: action.note || "", streak: 0, history: [0,0,0,0,0,0,0], tickedToday: false };
-        habitsSnap = [...habitsSnap, h];
-        feedback = `Added habit: ${h.name}`;
-        break;
-      }
-      case "tick_habit": {
-        habitsSnap = habitsSnap.map((h) => {
-          if (h.id === action.id || h.name.toLowerCase().includes((action.name || "").toLowerCase())) {
+  const applyActions = (actions, g, t, h, i) => {
+    let gs = [...g], ts = [...t], hs = [...h], is = [...i];
+    let needsPlan = false;
+
+    for (const action of actions) {
+      switch (action.type) {
+        case "add_goal": {
+          const ng = { id: Date.now().toString() + Math.random(), name: action.name, area: action.area || "Other", desc: action.desc || "", deadline: action.deadline || "", p: action.priority || "maint" };
+          gs = [...gs, ng];
+          addToast(`Added goal: ${ng.name}`);
+          break;
+        }
+        case "edit_goal": {
+          gs = gs.map((x) => x.id === action.id ? { ...x, ...action.updates } : x);
+          addToast(`Updated goal`);
+          break;
+        }
+        case "delete_goal": {
+          gs = gs.filter((x) => x.id !== action.id);
+          addToast(`Deleted goal`);
+          break;
+        }
+        case "set_goal_priority": {
+          gs = gs.map((x) => x.name.toLowerCase().includes(action.name?.toLowerCase() || "") ? { ...x, p: action.priority } : x);
+          addToast(`Updated priority`);
+          break;
+        }
+        case "add_task": {
+          const nt = { id: Date.now().toString() + Math.random(), name: action.name, due: action.due || "", goal: action.goal || "", desc: action.desc || "", imp: action.importance || 2, done: false };
+          ts = [...ts, nt];
+          addToast(`Added task: ${nt.name}`);
+          break;
+        }
+        case "complete_task": {
+          ts = ts.map((x) => {
+            const match = action.id ? x.id === action.id : x.name.toLowerCase().includes((action.name || "").toLowerCase());
+            if (match && !x.done) addHistory("task", `Completed: ${x.name}`);
+            return match ? { ...x, done: true } : x;
+          });
+          addToast(`Task completed`);
+          break;
+        }
+        case "uncomplete_task": {
+          ts = ts.map((x) => {
+            const match = action.id ? x.id === action.id : x.name.toLowerCase().includes((action.name || "").toLowerCase());
+            return match ? { ...x, done: false } : x;
+          });
+          addToast(`Task reopened`);
+          break;
+        }
+        case "delete_task": {
+          ts = ts.filter((x) => x.id !== action.id && !x.name.toLowerCase().includes((action.name || "").toLowerCase()));
+          addToast(`Deleted task`);
+          break;
+        }
+        case "edit_task": {
+          ts = ts.map((x) => x.id === action.id ? { ...x, ...action.updates } : x);
+          addToast(`Updated task`);
+          break;
+        }
+        case "add_habit": {
+          const nh = { id: Date.now().toString() + Math.random(), name: action.name, freq: action.freq || "daily", note: action.note || "", streak: 0, history: [0,0,0,0,0,0,0], tickedToday: false };
+          hs = [...hs, nh];
+          addToast(`Added habit: ${nh.name}`);
+          break;
+        }
+        case "tick_habit": {
+          hs = hs.map((x) => {
+            const match = action.id ? x.id === action.id : x.name.toLowerCase().includes((action.name || "").toLowerCase());
+            if (!match) return x;
             const ticked = action.value !== undefined ? action.value : true;
-            return { ...h, tickedToday: ticked, streak: ticked ? h.streak + 1 : Math.max(0, h.streak - 1), history: [...(h.history || [0,0,0,0,0,0,0]).slice(1), ticked ? 1 : 0] };
-          }
-          return h;
-        });
-        feedback = `Updated habit`;
-        break;
+            if (ticked) addHistory("habit", `Habit done: ${x.name}`);
+            return { ...x, tickedToday: ticked, streak: ticked ? x.streak + 1 : Math.max(0, x.streak - 1), history: [...(x.history || [0,0,0,0,0,0,0]).slice(1), ticked ? 1 : 0] };
+          });
+          addToast(`Habit updated`);
+          break;
+        }
+        case "delete_habit": {
+          hs = hs.filter((x) => x.id !== action.id && !x.name.toLowerCase().includes((action.name || "").toLowerCase()));
+          addToast(`Deleted habit`);
+          break;
+        }
+        case "add_idea": {
+          const ni = { id: Date.now().toString() + Math.random(), t: action.text };
+          is = [...is, ni];
+          addToast(`Added idea`);
+          break;
+        }
+        case "delete_idea": {
+          is = is.filter((x) => x.id !== action.id && !x.t.toLowerCase().includes((action.text || "").toLowerCase()));
+          addToast(`Deleted idea`);
+          break;
+        }
+        case "generate_plan": {
+          needsPlan = true;
+          break;
+        }
+        case "clear_completed_tasks": {
+          ts = ts.filter((x) => !x.done);
+          addToast(`Cleared completed tasks`);
+          break;
+        }
+        default: break;
       }
-      case "add_idea": {
-        const i = { id: Date.now().toString(), t: action.text };
-        ideasSnap = [...ideasSnap, i];
-        feedback = `Added idea`;
-        break;
-      }
-      default: break;
     }
-    if (feedback) {
-      setActionFeedback(feedback);
-      setTimeout(() => setActionFeedback(""), 3000);
-    }
-    return { goalsSnap, tasksSnap, habitsSnap, ideasSnap };
+
+    return { gs, ts, hs, is, needsPlan };
   };
 
-  const generatePlan = async (goalsRef, tasksRef, habitsRef, ideasRef, skipRef) => {
+  const generatePlan = async (g, t, h, i, sp) => {
     setPlanLoading(true);
-    const ctx = buildContext(goalsRef || goals, tasksRef || tasks, habitsRef || habits, ideasRef || ideas, skipRef || skipPatterns);
+    const ctx = buildContext(g || goals, t || tasks, h || habits, i || ideas, sp || skipPatterns);
     try {
       const text = await callClaude(
         `You are a personal day planner for Locus. ${ctx}\n\nGenerate a realistic time-blocked day plan. Rules:\n- Front burner goals get the most time\n- Maintenance goals get shorter blocks\n- Back burner only if space\n- Pending tasks get specific slots by importance\n- Habits are constraints, weave them in\n- Avoid blocks that match skip patterns\n- Include flex time\n- Respond ONLY with a JSON array, no markdown. Format: [{"time":"7:00 - 9:00 am","title":"Block title","desc":"Description","imp":3}]. imp is 1-3.`,
@@ -178,8 +227,9 @@ export default function App() {
       const clean = text.replace(/```json|```/g, "").trim();
       const blocks = JSON.parse(clean).map((b, i) => ({ ...b, id: "b" + i, done: false, status: "pending" }));
       setPlanBlocks(blocks);
+      addToast("Plan generated");
     } catch (e) {
-      alert("Error generating plan.");
+      addToast("Error generating plan");
     }
     setPlanLoading(false);
   };
@@ -215,61 +265,68 @@ export default function App() {
   };
 
   const sendChat = async () => {
-    if (!chatInput.trim()) return;
+    if (!chatInput.trim() || chatLoading) return;
     const userMsg = chatInput.trim();
     setChatInput("");
     setChatHistory((prev) => [...prev, { role: "user", content: userMsg }]);
     setChatLoading(true);
     const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns);
+
     try {
       const reply = await callClaude(
-        `You are a personal planner assistant inside Locus. You can directly modify the user's data by including a JSON action in your response.
+        `You are Locus, a personal life planner assistant. You have full ability to modify the user's data directly.
 
 ${ctx}
 
-AVAILABLE ACTIONS (include at most one per response):
-- Add goal: {"action":{"type":"add_goal","name":"...","area":"Fitness|Career|Learning|Social|Finance|Health|Creative|Other","desc":"...","deadline":"...","priority":"front|maint|back"}}
-- Edit goal: {"action":{"type":"edit_goal","id":"...","updates":{"name":"...","p":"...","desc":"..."}}}
-- Delete goal: {"action":{"type":"delete_goal","id":"..."}}
-- Add task: {"action":{"type":"add_task","name":"...","due":"...","goal":"...","importance":1|2|3}}
-- Complete task: {"action":{"type":"complete_task","name":"..."}}
-- Delete task: {"action":{"type":"delete_task","id":"..."}}
-- Add habit: {"action":{"type":"add_habit","name":"...","freq":"daily|weekdays|3x|weekly","note":"..."}}
-- Tick habit: {"action":{"type":"tick_habit","name":"..."}}
-- Add idea: {"action":{"type":"add_idea","text":"..."}}
+You can perform MULTIPLE actions in one response. After your message, include a JSON array of actions on the very last line.
 
-FORMAT: Respond with your message text, then on the very last line put the action JSON if needed. Example:
-Got it, I've added that goal for you.
-{"action":{"type":"add_goal","name":"Learn piano","area":"Learning","priority":"back"}}
+AVAILABLE ACTIONS:
+{"type":"add_goal","name":"...","area":"Fitness|Career|Learning|Social|Finance|Health|Creative|Other","desc":"...","deadline":"...","priority":"front|maint|back"}
+{"type":"edit_goal","id":"...","updates":{"name":"...","p":"front|maint|back","desc":"...","deadline":"..."}}
+{"type":"delete_goal","id":"..."}
+{"type":"set_goal_priority","name":"...","priority":"front|maint|back"}
+{"type":"add_task","name":"...","due":"...","goal":"...","importance":1|2|3}
+{"type":"complete_task","name":"..."}
+{"type":"uncomplete_task","name":"..."}
+{"type":"delete_task","name":"..."}
+{"type":"edit_task","id":"...","updates":{"name":"...","due":"...","imp":1|2|3}}
+{"type":"add_habit","name":"...","freq":"daily|weekdays|3x|weekly","note":"..."}
+{"type":"tick_habit","name":"...","value":true|false}
+{"type":"delete_habit","name":"..."}
+{"type":"add_idea","text":"..."}
+{"type":"delete_idea","text":"..."}
+{"type":"clear_completed_tasks"}
+{"type":"generate_plan"}
 
-If no action needed, just respond normally with no JSON.`,
+FORMAT: Write your response message, then on the very last line put the actions array. Example:
+Done! Added the goal and generated a fresh plan for you.
+[{"type":"add_goal","name":"Learn guitar","area":"Learning","priority":"back"},{"type":"generate_plan"}]
+
+If no actions needed, just respond normally with no JSON.
+Be conversational and direct. Reference the user's actual data. If they say something vague like "add my fitness goals", ask what specifically they want. Always confirm what you did.`,
         [...chatHistory, { role: "user", content: userMsg }]
       );
 
       let message = reply;
-      let action = null;
+      let actions = [];
 
       const lines = reply.trim().split("\n");
       const lastLine = lines[lines.length - 1].trim();
-      if (lastLine.startsWith('{"action"')) {
+      if (lastLine.startsWith("[")) {
         try {
-          const parsed = JSON.parse(lastLine);
-          if (parsed.action) {
-            action = parsed.action;
-            message = lines.slice(0, -1).join("\n").trim();
-          }
+          actions = JSON.parse(lastLine);
+          message = lines.slice(0, -1).join("\n").trim();
         } catch (e) {}
       }
 
-      if (action) {
-        const { goalsSnap, tasksSnap, habitsSnap, ideasSnap } = applyAction(action, goals, tasks, habits, ideas);
-        setGoals(goalsSnap);
-        setTasks(tasksSnap);
-        setHabits(habitsSnap);
-        setIdeas(ideasSnap);
-
-        if (action.type === "generate_plan") {
-          await generatePlan(goalsSnap, tasksSnap, habitsSnap, ideasSnap, skipPatterns);
+      if (actions.length > 0) {
+        const { gs, ts, hs, is, needsPlan } = applyActions(actions, goals, tasks, habits, ideas);
+        setGoals(gs);
+        setTasks(ts);
+        setHabits(hs);
+        setIdeas(is);
+        if (needsPlan) {
+          await generatePlan(gs, ts, hs, is, skipPatterns);
         }
       }
 
@@ -287,8 +344,8 @@ If no action needed, just respond normally with no JSON.`,
   const progress = planBlocks.length ? Math.round((planBlocks.filter((b) => b.done).length / planBlocks.length) * 100) : 0;
 
   const navItems = [
-    { id: "today", label: "Today" },
     { id: "chat", label: "Chat" },
+    { id: "today", label: "Today" },
     { id: "goals", label: "Goals", badge: goals.length },
     { id: "tasks", label: "Tasks", badge: tasks.filter((t) => !t.done).length },
     { id: "habits", label: "Habits", badge: habits.length },
@@ -299,8 +356,16 @@ If no action needed, just respond normally with no JSON.`,
   return (
     <div style={{ display: "flex", height: "100vh", overflow: "hidden", background: "#1a1a20", color: "#f2efe9", fontFamily: "'Geist', 'Inter', sans-serif", fontSize: 14 }}>
 
+      {/* TOASTS */}
+      <div style={{ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 400, display: "flex", flexDirection: "column", gap: 6, alignItems: "center" }}>
+        {toasts.map((t) => (
+          <div key={t.id} style={{ background: "#2a2a34", border: "1px solid rgba(142,174,251,0.3)", borderRadius: 8, padding: "8px 16px", fontSize: 12, color: "#8eaefb", fontFamily: "monospace", whiteSpace: "nowrap", boxShadow: "0 4px 12px rgba(0,0,0,0.3)" }}>{t.msg}</div>
+        ))}
+      </div>
+
       {sidebarOpen && <div onClick={() => setSidebarOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50 }} />}
 
+      {/* SIDEBAR */}
       <div style={{ position: "fixed", top: 0, left: 0, height: "100%", width: 220, background: "#22222a", borderRight: "1px solid rgba(255,255,255,0.09)", display: "flex", flexDirection: "column", zIndex: 60, transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.22s ease" }}>
         <div style={{ padding: "24px 20px 18px", display: "flex", alignItems: "flex-start", justifyContent: "space-between" }}>
           <div>
@@ -323,14 +388,10 @@ If no action needed, just respond normally with no JSON.`,
         </div>
       </div>
 
+      {/* MAIN */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" }}>
 
-        {actionFeedback && (
-          <div style={{ position: "fixed", bottom: 80, left: "50%", transform: "translateX(-50%)", background: "#2a2a34", border: "1px solid rgba(142,174,251,0.3)", borderRadius: 8, padding: "8px 16px", fontSize: 12, color: "#8eaefb", fontFamily: "monospace", zIndex: 300, whiteSpace: "nowrap" }}>
-            {actionFeedback}
-          </div>
-        )}
-
+        {/* TOP BAR */}
         <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
           <button onClick={() => setSidebarOpen(true)} style={{ background: "none", border: "none", cursor: "pointer", color: "#b0aca6", fontSize: 20, lineHeight: 1, flexShrink: 0 }}>&#9776;</button>
           <div style={{ fontFamily: "Georgia, serif", fontSize: 16, fontStyle: "italic", color: "#f2efe9" }}>
@@ -338,6 +399,27 @@ If no action needed, just respond normally with no JSON.`,
           </div>
         </div>
 
+        {/* CHAT — default tab */}
+        {tab === "chat" && (
+          <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "16px 20px" }}>
+              <div style={{ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", alignSelf: "flex-start", borderBottomLeftRadius: 3 }}>
+                Hey — I'm your Locus assistant. Tell me anything: add a goal, check off a task, update a habit, build your plan for today. I'll handle it.
+              </div>
+              {chatHistory.map((m, i) => (
+                <div key={i} style={{ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#22222a", border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)", borderBottomRightRadius: m.role === "user" ? 3 : 12, borderBottomLeftRadius: m.role === "user" ? 12 : 3 }}>{m.content}</div>
+              ))}
+              {chatLoading && <div style={{ fontSize: 12, color: "#706d68", fontFamily: "monospace", alignSelf: "flex-start" }}>thinking...</div>}
+              <div ref={chatBottomRef} />
+            </div>
+            <div style={{ display: "flex", gap: 8, padding: "12px 20px 20px", borderTop: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
+              <input value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendChat(); }} placeholder="Add a goal, check off a task, build my plan..." style={{ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 16, color: "#f2efe9", outline: "none" }} />
+              <button onClick={sendChat} disabled={chatLoading} style={{ background: "rgba(142,174,251,0.16)", border: "1px solid rgba(142,174,251,0.28)", borderRadius: 7, padding: "10px 16px", color: "#8eaefb", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>Send</button>
+            </div>
+          </div>
+        )}
+
+        {/* TODAY */}
         {tab === "today" && (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
             <div style={{ padding: "16px 20px 14px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
@@ -358,7 +440,7 @@ If no action needed, just respond normally with no JSON.`,
               </div>
             </div>
             <div style={{ flex: 1, overflowY: "auto" }}>
-              {!planBlocks.length && <div style={{ padding: "48px 20px", color: "#706d68", fontFamily: "monospace", fontSize: 12, textAlign: "center" }}>No plan yet. Hit Generate to build your day.</div>}
+              {!planBlocks.length && <div style={{ padding: "48px 20px", color: "#706d68", fontFamily: "monospace", fontSize: 12, textAlign: "center" }}>No plan yet. Tell Claude to build your plan, or hit Generate above.</div>}
               {donePlanBlocks.map((b) => <PlanBlock key={b.id} block={b} onToggle={toggleBlock} onSkip={skipBlock} onReschedule={setRescheduleModal} />)}
               {donePlanBlocks.length > 0 && pendingPlanBlocks.length > 0 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 16px 7px 48px" }}>
@@ -372,13 +454,14 @@ If no action needed, just respond normally with no JSON.`,
           </div>
         )}
 
+        {/* GOALS */}
         {tab === "goals" && (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
             <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" }}>
-              <button onClick={() => setGoalModal({ name: "", area: "Fitness", desc: "", deadline: "", p: "front" })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add goal</button>
+              <button onClick={() => setGoalModal({ name: "", area: "Fitness", desc: "", deadline: "", p: "front" })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add</button>
             </div>
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-              {!goals.length && <div style={{ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" }}>no goals yet</div>}
+              {!goals.length && <div style={{ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" }}>no goals yet — tell Claude to add some</div>}
               {[...goals].sort((a, b) => ["front","maint","back"].indexOf(a.p) - ["front","maint","back"].indexOf(b.p)).map((g) => (
                 <div key={g.id} onClick={() => setGoalModal(g)} style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderLeft: `3px solid ${g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68"}`, borderRadius: 12, padding: "14px 16px", marginBottom: 10, cursor: "pointer" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginLeft: 4 }}>
@@ -397,10 +480,11 @@ If no action needed, just respond normally with no JSON.`,
           </div>
         )}
 
+        {/* TASKS */}
         {tab === "tasks" && (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
             <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" }}>
-              <button onClick={() => setTaskModal({ name: "", due: "", goal: "", desc: "", imp: 2, done: false })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add task</button>
+              <button onClick={() => setTaskModal({ name: "", due: "", goal: "", desc: "", imp: 2, done: false })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add</button>
             </div>
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               <div style={{ fontSize: 10, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 }}>Pending</div>
@@ -416,14 +500,15 @@ If no action needed, just respond normally with no JSON.`,
           </div>
         )}
 
+        {/* HABITS */}
         {tab === "habits" && (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
             <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" }}>
-              <button onClick={() => setHabitModal({ name: "", freq: "daily", note: "" })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add habit</button>
+              <button onClick={() => setHabitModal({ name: "", freq: "daily", note: "" })} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>+ Add</button>
             </div>
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-              <div style={{ background: "#2a2a34", borderRadius: 7, padding: "10px 14px", fontSize: 11, color: "#706d68", lineHeight: 1.6, marginBottom: 14, borderLeft: "3px solid rgba(237,190,128,0.3)" }}>Not tasks — these reset daily and shape how Claude builds your plan. Tick each day to build your streak.</div>
-              {!habits.length && <div style={{ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" }}>no habits yet</div>}
+              <div style={{ background: "#2a2a34", borderRadius: 7, padding: "10px 14px", fontSize: 11, color: "#706d68", lineHeight: 1.6, marginBottom: 14, borderLeft: "3px solid rgba(237,190,128,0.3)" }}>Not tasks — these reset daily and shape how Claude builds your plan.</div>
+              {!habits.length && <div style={{ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" }}>no habits yet — tell Claude to add some</div>}
               {habits.map((h) => (
                 <div key={h.id} style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 12, padding: "13px 15px", marginBottom: 9, display: "flex", alignItems: "center", gap: 12 }}>
                   <div style={{ flex: 1 }}>
@@ -444,7 +529,7 @@ If no action needed, just respond normally with no JSON.`,
                     setHabits((prev) => prev.map((x) => {
                       if (x.id !== h.id) return x;
                       const ticked = !x.tickedToday;
-                      if (ticked) addHistory("habit", `Habit done: ${x.name} — ${x.streak + 1} day streak`);
+                      if (ticked) addHistory("habit", `Habit done: ${x.name}`);
                       return { ...x, tickedToday: ticked, streak: ticked ? x.streak + 1 : Math.max(0, x.streak - 1), history: [...(x.history || [0,0,0,0,0,0,0]).slice(1), ticked ? 1 : 0] };
                     }));
                   }} style={{ width: 28, height: 28, border: `1.5px solid ${h.tickedToday ? "#81c995" : "rgba(255,255,255,0.22)"}`, borderRadius: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: h.tickedToday ? "rgba(129,201,149,0.12)" : "none", color: "#81c995", fontSize: 13 }}>
@@ -457,11 +542,12 @@ If no action needed, just respond normally with no JSON.`,
           </div>
         )}
 
+        {/* IDEAS */}
         {tab === "ideas" && (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
-                <input value={ideaInput} onChange={(e) => setIdeaInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && ideaInput.trim()) { setIdeas((prev) => [...prev, { id: Date.now().toString(), t: ideaInput.trim() }]); setIdeaInput(""); }}} placeholder="Drop an idea, no commitment..." style={{ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 13, color: "#f2efe9", outline: "none" }} />
+                <input value={ideaInput} onChange={(e) => setIdeaInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && ideaInput.trim()) { setIdeas((prev) => [...prev, { id: Date.now().toString(), t: ideaInput.trim() }]); setIdeaInput(""); }}} placeholder="Drop an idea..." style={{ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 16, color: "#f2efe9", outline: "none" }} />
                 <button onClick={() => { if (ideaInput.trim()) { setIdeas((prev) => [...prev, { id: Date.now().toString(), t: ideaInput.trim() }]); setIdeaInput(""); }}} style={{ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "10px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>Add</button>
               </div>
               {ideas.map((i) => (
@@ -475,6 +561,7 @@ If no action needed, just respond normally with no JSON.`,
           </div>
         )}
 
+        {/* HISTORY */}
         {tab === "history" && (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
@@ -497,26 +584,9 @@ If no action needed, just respond normally with no JSON.`,
             </div>
           </div>
         )}
-
-        {tab === "chat" && (
-          <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-            <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "16px 20px" }}>
-              <div style={{ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", alignSelf: "flex-start", borderBottomLeftRadius: 3 }}>
-                Hey — I know your goals, tasks, habits, and patterns. I can also update them directly — just tell me what to add, change, or check off.
-              </div>
-              {chatHistory.map((m, i) => (
-                <div key={i} style={{ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#22222a", border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)", borderBottomRightRadius: m.role === "user" ? 3 : 12, borderBottomLeftRadius: m.role === "user" ? 12 : 3 }}>{m.content}</div>
-              ))}
-              {chatLoading && <div style={{ fontSize: 12, color: "#706d68", fontFamily: "monospace", alignSelf: "flex-start" }}>thinking...</div>}
-            </div>
-            <div style={{ display: "flex", gap: 8, padding: "12px 20px 20px", borderTop: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 }}>
-              <input value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendChat(); }} placeholder="Add a goal, check off a task, ask anything..." style={{ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 13, color: "#f2efe9", outline: "none" }} />
-              <button onClick={sendChat} disabled={chatLoading} style={{ background: "rgba(142,174,251,0.16)", border: "1px solid rgba(142,174,251,0.28)", borderRadius: 7, padding: "10px 16px", color: "#8eaefb", fontSize: 12, fontWeight: 500, cursor: "pointer" }}>Send</button>
-            </div>
-          </div>
-        )}
       </div>
 
+      {/* MODALS */}
       {goalModal && (
         <Modal onClose={() => setGoalModal(null)} title={goalModal.id ? "Edit goal" : "Add goal"}>
           <Field label="Goal name"><input value={goalModal.name} onChange={(e) => setGoalModal((m) => ({ ...m, name: e.target.value }))} placeholder="e.g. Land a fintech role" /></Field>
@@ -525,7 +595,7 @@ If no action needed, just respond normally with no JSON.`,
               {["Fitness","Career","Learning","Social","Finance","Health","Creative","Other"].map((a) => <option key={a}>{a}</option>)}
             </select>
           </Field>
-          <Field label="Description"><textarea value={goalModal.desc} onChange={(e) => setGoalModal((m) => ({ ...m, desc: e.target.value }))} placeholder="Why this matters, what progress looks like..." /></Field>
+          <Field label="Description"><textarea value={goalModal.desc} onChange={(e) => setGoalModal((m) => ({ ...m, desc: e.target.value }))} placeholder="Why this matters..." /></Field>
           <Field label="Target timeframe"><input value={goalModal.deadline} onChange={(e) => setGoalModal((m) => ({ ...m, deadline: e.target.value }))} placeholder="e.g. Spring 2027" /></Field>
           <Field label="Priority">
             <div style={{ display: "flex", gap: 6 }}>
