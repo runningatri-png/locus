@@ -325,7 +325,7 @@ Additional instructions: ${extraInstructions || "none"}
 
 Generate a realistic flexible plan for tomorrow. Rules:
 - NO rigid times unless specified
-- Use approximate durations: (~1 hr), (~90 min), (~30 min)  
+- Use approximate durations: (~1 hr), (~90 min), (~30 min)
 - Order by when things should happen
 - Factor in selected suggestions and additional instructions
 - Habits auto-apply, don't list unless needing dedicated time
@@ -464,14 +464,17 @@ Respond ONLY with JSON array:
     setChatHistory((prev) => [...prev, { role: "user", content: userMsg }]);
     setChatLoading(true);
     const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns, journal, timestamps, context);
-
     const needsSearch = /search|find|look up|what's happening|events|news|current|latest|near me|festival|concert|restaurant/i.test(userMsg);
+    const planState = JSON.stringify(todayPlan.map(b => ({ title: b.title, status: b.done ? "done" : b.status, duration: b.duration })));
 
     try {
       const reply = await callClaude(
         `You are Locus, a personal life planner assistant. You have full ability to modify the user's data directly and search the web when relevant.
 
 ${ctx}
+
+CURRENT TODAY PLAN STATE:
+${planState}
 
 You can perform MULTIPLE actions in one response. After your message, include a JSON array of actions on the very last line.
 
@@ -494,6 +497,8 @@ AVAILABLE ACTIONS:
 {"type":"generate_plan"}
 {"type":"generate_tomorrow_plan"}
 {"type":"clear_completed_tasks"}
+
+CRITICAL ADAPTIVE REPLANNING RULE: If the user tells you ANYTHING about their day changing — finished something early, ran short on time, something came up, wants to move things around, only did part of something, feels tired, plans changed — you MUST include {"type":"generate_plan"} in your actions. Never just acknowledge it conversationally without updating the plan. The plan must always reflect reality.
 
 FORMAT: Write your response, then on the very last line put the actions array if needed.
 Example:
@@ -586,7 +591,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
   return (
     <div style={s({ display: "flex", height: "100vh", overflow: "hidden", background: "#1a1a20", color: "#f2efe9", fontFamily: "'Geist','Inter',sans-serif", fontSize: 14 })}>
 
-      {/* TOASTS */}
       <div style={s({ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 400, display: "flex", flexDirection: "column", gap: 6, alignItems: "center", pointerEvents: "none" })}>
         {toasts.map((t) => (
           <div key={t.id} style={s({ background: "#2a2a34", border: "1px solid rgba(142,174,251,0.3)", borderRadius: 8, padding: "8px 16px", fontSize: 12, color: "#8eaefb", fontFamily: "monospace", whiteSpace: "nowrap" })}>{t.msg}</div>
@@ -595,7 +599,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
 
       {sidebarOpen && <div onClick={() => setSidebarOpen(false)} style={s({ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50 })} />}
 
-      {/* SIDEBAR */}
       <div style={s({ position: "fixed", top: 0, left: 0, height: "100%", width: 220, background: "#22222a", borderRight: "1px solid rgba(255,255,255,0.09)", display: "flex", flexDirection: "column", zIndex: 60, transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.22s ease" })}>
         <div style={s({ padding: "24px 20px 18px", display: "flex", alignItems: "flex-start", justifyContent: "space-between" })}>
           <div>
@@ -618,10 +621,8 @@ Be conversational and direct. Reference their actual data. Always confirm what y
         </div>
       </div>
 
-      {/* MAIN */}
       <div style={s({ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" })}>
 
-        {/* TOP BAR */}
         <div style={s({ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
           <button onClick={() => setSidebarOpen(true)} style={s({ background: "none", border: "none", cursor: "pointer", color: "#b0aca6", fontSize: 20, lineHeight: 1, flexShrink: 0 })}>&#9776;</button>
           <div style={s({ fontFamily: "Georgia,serif", fontSize: 16, fontStyle: "italic", color: "#f2efe9" })}>
@@ -629,7 +630,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         </div>
 
-        {/* TODAY */}
         {tab === "today" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "16px 20px 14px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
@@ -664,15 +664,12 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {/* TOMORROW */}
         {tab === "tomorrow" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
               <div style={s({ fontFamily: "Georgia,serif", fontSize: 18, fontStyle: "italic", color: "#b0aca6" })}>{tomorrowStr}</div>
             </div>
             <div style={s({ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" })}>
-
-              {/* Suggestions */}
               <div style={s({ padding: "14px 20px 0" })}>
                 <div style={s({ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 })}>
                   <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.08em" })}>Suggestions for tomorrow</div>
@@ -696,7 +693,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
                 </div>
               </div>
 
-              {/* Tomorrow plan preview */}
               {tomorrowPlan.length > 0 && (
                 <div style={s({ padding: "0 20px 14px" })}>
                   <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 })}>Plan for tomorrow</div>
@@ -714,7 +710,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
                 </div>
               )}
 
-              {/* Tomorrow chat */}
               <div style={s({ borderTop: "1px solid rgba(255,255,255,0.09)", padding: "12px 20px", flexShrink: 0 })}>
                 <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", marginBottom: 8 })}>
                   {selectedSuggestions.length > 0 ? `${selectedSuggestions.length} suggestion${selectedSuggestions.length > 1 ? "s" : ""} selected — tell me anything else, or say "generate my plan"` : "Select suggestions above or tell me what you need tomorrow"}
@@ -735,7 +730,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {/* CHAT */}
         {tab === "chat" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "16px 20px" })}>
@@ -755,7 +749,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {/* SUGGESTIONS */}
         {tab === "suggestions" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end", flexShrink: 0 })}>
@@ -782,7 +775,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {/* JOURNAL */}
         {tab === "journal" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
@@ -811,7 +803,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {/* GOALS */}
         {tab === "goals" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" })}>
@@ -837,7 +828,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {/* TASKS */}
         {tab === "tasks" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" })}>
@@ -857,7 +847,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {/* HABITS */}
         {tab === "habits" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" })}>
@@ -899,7 +888,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {/* IDEAS */}
         {tab === "ideas" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
@@ -919,7 +907,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {/* HISTORY */}
         {tab === "history" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
@@ -944,7 +931,6 @@ Be conversational and direct. Reference their actual data. Always confirm what y
         )}
       </div>
 
-      {/* MODALS */}
       {goalModal && (
         <Modal onClose={() => setGoalModal(null)} title={goalModal.id ? "Edit goal" : "Add goal"}>
           <Field label="Goal name"><input value={goalModal.name} onChange={(e) => setGoalModal((m) => ({ ...m, name: e.target.value }))} placeholder="e.g. Land a fintech role" /></Field>
