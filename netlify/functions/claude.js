@@ -24,7 +24,7 @@ exports.handler = async (event) => {
 
     const body = {
       model: 'claude-sonnet-4-5',
-      max_tokens: 2000,
+      max_tokens: 800,
       system,
       messages,
     }
@@ -34,8 +34,9 @@ exports.handler = async (event) => {
       body.tools = [{
         type: "web_search_20250305",
         name: "web_search",
-        max_uses: 3
+        max_uses: 2
       }]
+      body.max_tokens = 1200
     }
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -46,37 +47,35 @@ exports.handler = async (event) => {
 
     const data = await response.json()
     console.log('Status:', response.status)
-    console.log('Response:', JSON.stringify(data).slice(0, 800))
+    console.log('Response:', JSON.stringify(data).slice(0, 500))
 
-    if (data.error) {
-      // If web search failed, retry without it
-      if (useWebSearch) {
-        console.log('Web search failed, retrying without...')
-        const body2 = {
-          model: 'claude-sonnet-4-5',
-          max_tokens: 2000,
-          system,
-          messages,
-        }
-        const response2 = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': process.env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify(body2),
-        })
-        const data2 = await response2.json()
-        const text2 = data2.content?.filter(b => b.type === 'text').map(b => b.text).join('\n') || ''
-        return {
-          statusCode: 200,
-          headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
-          body: JSON.stringify({ content: [{ type: 'text', text: text2 }] }),
-        }
+    if (data.error && useWebSearch) {
+      console.log('Web search failed, retrying without...')
+      const body2 = {
+        model: 'claude-sonnet-4-5',
+        max_tokens: 800,
+        system,
+        messages,
       }
-      throw new Error(data.error.message)
+      const response2 = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(body2),
+      })
+      const data2 = await response2.json()
+      const text2 = data2.content?.filter(b => b.type === 'text').map(b => b.text).join('\n') || ''
+      return {
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+        body: JSON.stringify({ content: [{ type: 'text', text: text2 }] }),
+      }
     }
+
+    if (data.error) throw new Error(data.error.message)
 
     const textContent = data.content
       ?.filter(b => b.type === 'text')
