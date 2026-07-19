@@ -4,9 +4,4 @@
   functions = "netlify/functions"
 
 [functions]
-  timeout = 26
-
-[dev]
-  command = "npm run dev"
-  port = 8888
-  targetPort = 5173
+  node_bundler = "esbuild"
