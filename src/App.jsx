@@ -10,9 +10,9 @@ const STORAGE_KEYS = {
   tomorrowPlan: "locus-tomorrow-plan",
   history: "locus-history",
   skipPatterns: "locus-skip-patterns",
-  journal: "locus-journal",
   timestamps: "locus-timestamps",
   context: "locus-context",
+  planArchive: "locus-plan-archive",
 };
 
 function load(key, fallback) {
@@ -26,6 +26,14 @@ function save(key, val) {
   localStorage.setItem(key, JSON.stringify(val));
 }
 
+function dateKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function histDateFormat(d) {
+  return d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+}
+
 async function callClaude(system, messages, useWebSearch = false) {
   const res = await fetch("/.netlify/functions/claude", {
     method: "POST",
@@ -36,7 +44,7 @@ async function callClaude(system, messages, useWebSearch = false) {
   return data.content?.[0]?.text || "Something went wrong.";
 }
 
-function buildContext(goals, tasks, habits, ideas, skipPatterns, journal, timestamps, context) {
+function buildContext(goals, tasks, habits, ideas, skipPatterns, timestamps, context) {
   const ord = ["front", "maint", "back"];
   const sorted = [...goals].sort((a, b) => ord.indexOf(a.p) - ord.indexOf(b.p));
   const fp = sorted.filter((g) => g.p === "front");
@@ -47,7 +55,6 @@ function buildContext(goals, tasks, habits, ideas, skipPatterns, journal, timest
   const ft = pt.length ? pt.map((t) => `- [id:${t.id}] ${t.name}${t.due ? ", due " + t.due : ""}${t.goal ? " [goal: " + t.goal + "]" : ""}${t.imp ? " [importance: " + t.imp + "/3]" : ""}`).join("\n") : "None";
   const patterns = Object.entries(skipPatterns).filter(([, c]) => c >= 2).map(([k, c]) => `- "${k}" skipped ${c}x`).join("\n") || "None";
   const habitCtx = habits.map((h) => `- [id:${h.id}] ${h.name} (${h.freq})${h.note ? ": " + h.note : ""}, streak: ${h.streak} days`).join("\n") || "None";
-  const recentJournal = journal.slice(0, 5).map((j) => `- ${j.date}: ${j.text}`).join("\n") || "None";
   const tsCtx = Object.entries(timestamps).slice(0, 10).map(([k, v]) => `- ${k}: avg ${v.avg} min, ${v.count} completions`).join("\n") || "None";
   const ctxNotes = context.slice(0, 3).map((c) => `- ${c.date}: ${c.text}`).join("\n") || "None";
   return `USER CONTEXT:
@@ -71,9 +78,6 @@ ${patterns}
 
 COMPLETION TIME DATA:
 ${tsCtx}
-
-RECENT JOURNAL ENTRIES:
-${recentJournal}
 
 LIFE CONTEXT NOTES:
 ${ctxNotes}
@@ -103,11 +107,11 @@ export default function App() {
   const [ideas, setIdeas] = useState(() => load(STORAGE_KEYS.ideas, []));
   const [todayPlan, setTodayPlan] = useState(() => load(STORAGE_KEYS.todayPlan, []));
   const [tomorrowPlan, setTomorrowPlan] = useState(() => load(STORAGE_KEYS.tomorrowPlan, []));
+  const [planArchive, setPlanArchive] = useState(() => load(STORAGE_KEYS.planArchive, {}));
   const [tomorrowSuggestions, setTomorrowSuggestions] = useState([]);
   const [selectedSuggestions, setSelectedSuggestions] = useState([]);
   const [history, setHistory] = useState(() => load(STORAGE_KEYS.history, []));
   const [skipPatterns, setSkipPatterns] = useState(() => load(STORAGE_KEYS.skipPatterns, {}));
-  const [journal, setJournal] = useState(() => load(STORAGE_KEYS.journal, []));
   const [timestamps, setTimestamps] = useState(() => load(STORAGE_KEYS.timestamps, {}));
   const [context, setContext] = useState(() => load(STORAGE_KEYS.context, []));
   const [chatHistory, setChatHistory] = useState([]);
@@ -118,7 +122,6 @@ export default function App() {
   const [tomorrowChatLoading, setTomorrowChatLoading] = useState(false);
   const [planLoading, setPlanLoading] = useState(false);
   const [suggestionsLoading, setSuggestionsLoading] = useState(false);
-  const [suggestions, setSuggestions] = useState([]);
   const [goalModal, setGoalModal] = useState(null);
   const [taskModal, setTaskModal] = useState(null);
   const [habitModal, setHabitModal] = useState(null);
@@ -126,8 +129,9 @@ export default function App() {
   const [rescheduleReason, setRescheduleReason] = useState("");
   const [rescheduleTime, setRescheduleTime] = useState("");
   const [ideaInput, setIdeaInput] = useState("");
-  const [journalInput, setJournalInput] = useState("");
   const [toasts, setToasts] = useState([]);
+  const [calMonth, setCalMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
+  const [calSelected, setCalSelected] = useState(() => dateKey(new Date()));
   const chatBottomRef = useRef(null);
   const tomorrowChatBottomRef = useRef(null);
 
@@ -139,11 +143,31 @@ export default function App() {
   useEffect(() => { save(STORAGE_KEYS.tomorrowPlan, tomorrowPlan); }, [tomorrowPlan]);
   useEffect(() => { save(STORAGE_KEYS.history, history); }, [history]);
   useEffect(() => { save(STORAGE_KEYS.skipPatterns, skipPatterns); }, [skipPatterns]);
-  useEffect(() => { save(STORAGE_KEYS.journal, journal); }, [journal]);
   useEffect(() => { save(STORAGE_KEYS.timestamps, timestamps); }, [timestamps]);
   useEffect(() => { save(STORAGE_KEYS.context, context); }, [context]);
+  useEffect(() => { save(STORAGE_KEYS.planArchive, planArchive); }, [planArchive]);
   useEffect(() => { chatBottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatHistory, chatLoading]);
   useEffect(() => { tomorrowChatBottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [tomorrowChatHistory, tomorrowChatLoading]);
+
+  // Archive today's plan by date so Calendar can show past days
+  useEffect(() => {
+    if (todayPlan.length) {
+      setPlanArchive((prev) => ({ ...prev, [dateKey(new Date())]: todayPlan }));
+    }
+  }, [todayPlan]);
+
+  // Roll tomorrow's plan into today when the day arrives
+  useEffect(() => {
+    const targetDate = localStorage.getItem("locus-tomorrow-date");
+    if (targetDate && targetDate === dateKey(new Date())) {
+      const tPlan = load(STORAGE_KEYS.tomorrowPlan, []);
+      if (tPlan.length) {
+        setTodayPlan(tPlan.map((b) => ({ ...b, done: false, status: "pending", startTime: null })));
+        setTomorrowPlan([]);
+        localStorage.removeItem("locus-tomorrow-date");
+      }
+    }
+  }, []);
 
   const addToast = (msg) => {
     const id = Date.now();
@@ -152,7 +176,7 @@ export default function App() {
   };
 
   const addHistory = (type, text) => {
-    const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+    const today = histDateFormat(new Date());
     setHistory((prev) => {
       const next = [...prev];
       if (!next.length || next[0].date !== today) next.unshift({ date: today, entries: [] });
@@ -284,7 +308,7 @@ export default function App() {
 
   const generateTodayPlan = async (g, t, h, i, sp) => {
     setPlanLoading(true);
-    const ctx = buildContext(g || goals, t || tasks, h || habits, i || ideas, sp || skipPatterns, journal, timestamps, context);
+    const ctx = buildContext(g || goals, t || tasks, h || habits, i || ideas, sp || skipPatterns, timestamps, context);
     try {
       const text = await callClaude(
         `You are a personal day planner for Locus. ${ctx}
@@ -303,7 +327,7 @@ Generate a realistic flexible day plan. Rules:
         [{ role: "user", content: "Build my plan for today." }]
       );
       const clean = text.replace(/```json|```/g, "").trim();
-      const blocks = JSON.parse(clean).map((b, idx) => ({ ...b, id: "b" + idx, done: false, status: "pending", startTime: null }));
+      const blocks = JSON.parse(clean).map((b, idx) => ({ ...b, id: "b" + idx + Date.now(), done: false, status: "pending", startTime: null }));
       setTodayPlan(blocks);
       addToast("Today's plan generated");
     } catch (e) {
@@ -314,7 +338,7 @@ Generate a realistic flexible day plan. Rules:
 
   const generateTomorrowPlanFromChat = async (extraInstructions, g, t, h) => {
     setPlanLoading(true);
-    const ctx = buildContext(g || goals, t || tasks, h || habits, ideas, skipPatterns, journal, timestamps, context);
+    const ctx = buildContext(g || goals, t || tasks, h || habits, ideas, skipPatterns, timestamps, context);
     const selected = selectedSuggestions.join(", ");
     try {
       const text = await callClaude(
@@ -335,8 +359,11 @@ Generate a realistic flexible plan for tomorrow. Rules:
         [{ role: "user", content: "Build my plan for tomorrow." }]
       );
       const clean = text.replace(/```json|```/g, "").trim();
-      const blocks = JSON.parse(clean).map((b, idx) => ({ ...b, id: "t" + idx, done: false, status: "pending", startTime: null }));
+      const blocks = JSON.parse(clean).map((b, idx) => ({ ...b, id: "t" + idx + Date.now(), done: false, status: "pending", startTime: null }));
       setTomorrowPlan(blocks);
+      const tmrw = new Date();
+      tmrw.setDate(tmrw.getDate() + 1);
+      localStorage.setItem("locus-tomorrow-date", dateKey(tmrw));
       addToast("Tomorrow's plan generated");
     } catch (e) {
       addToast("Error generating tomorrow's plan");
@@ -346,7 +373,7 @@ Generate a realistic flexible plan for tomorrow. Rules:
 
   const loadTomorrowSuggestions = async () => {
     setSuggestionsLoading(true);
-    const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns, journal, timestamps, context);
+    const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns, timestamps, context);
     try {
       const text = await callClaude(
         `You are suggesting what to do tomorrow for the user. ${ctx}
@@ -370,45 +397,14 @@ Each suggestion should be a short actionable card. Respond ONLY with JSON array:
     setSuggestionsLoading(false);
   };
 
-  const loadSuggestions = async () => {
-    setSuggestionsLoading(true);
-    const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns, journal, timestamps, context);
-    try {
-      const text = await callClaude(
-        `You are a life coach and planner who knows this person deeply. ${ctx}
-
-Analyze everything and generate 6-8 suggestions. Mix of:
-- Pattern observations ("you keep skipping X, here's why it might be happening")
-- Opportunities ("there might be a good networking event or resource for your SE goal")
-- Long term ideas ("based on your interests, you might want to explore X")
-- Blind spots ("your social goal hasn't appeared in your plan in a week")
-- Actionable next steps for their most important goals
-
-Search the web if relevant for opportunities, events, or resources.
-Respond ONLY with JSON array:
-[{"title":"...","desc":"...","type":"pattern|opportunity|longterm|blindspot|action","imp":1|2|3}]`,
-        [{ role: "user", content: "What should I know and consider?" }],
-        true
-      );
-      const clean = text.replace(/```json|```/g, "").trim();
-      const sugs = JSON.parse(clean);
-      setSuggestions(sugs);
-    } catch (e) {
-      addToast("Error loading suggestions");
-    }
-    setSuggestionsLoading(false);
-  };
-
-  const toggleBlock = (id, planType) => {
-    const setter = planType === "tomorrow" ? setTomorrowPlan : setTodayPlan;
-    const plan = planType === "tomorrow" ? tomorrowPlan : todayPlan;
-    const block = plan.find((b) => b.id === id);
+  const toggleBlock = (id) => {
+    const block = todayPlan.find((b) => b.id === id);
     if (!block) return;
     if (!block.done) {
       logTimestamp(block.title, block.startTime);
       addHistory("task", `Completed: ${block.title}`);
     }
-    setter((prev) => prev.map((b) => b.id === id ? { ...b, done: !b.done, startTime: b.done ? Date.now() : b.startTime } : b));
+    setTodayPlan((prev) => prev.map((b) => b.id === id ? { ...b, done: !b.done, startTime: b.done ? Date.now() : b.startTime } : b));
     if (navigator.vibrate) navigator.vibrate([12, 8, 20]);
   };
 
@@ -443,27 +439,13 @@ Respond ONLY with JSON array:
     setRescheduleTime("");
   };
 
-  const saveJournal = () => {
-    if (!journalInput.trim()) return;
-    const today = new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
-    setJournal((prev) => {
-      const next = [...prev];
-      const existing = next.findIndex((j) => j.date === today);
-      if (existing >= 0) next[existing] = { ...next[existing], text: journalInput.trim(), updatedAt: Date.now() };
-      else next.unshift({ date: today, text: journalInput.trim(), createdAt: Date.now() });
-      return next;
-    });
-    setJournalInput("");
-    addToast("Journal entry saved");
-  };
-
   const sendChat = async () => {
     if (!chatInput.trim() || chatLoading) return;
     const userMsg = chatInput.trim();
     setChatInput("");
     setChatHistory((prev) => [...prev, { role: "user", content: userMsg }]);
     setChatLoading(true);
-    const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns, journal, timestamps, context);
+    const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns, timestamps, context);
     const needsSearch = /search|find|look up|what's happening|events|news|current|latest|near me|festival|concert|restaurant/i.test(userMsg);
     const planState = JSON.stringify(todayPlan.map(b => ({ title: b.title, status: b.done ? "done" : b.status, duration: b.duration })));
 
@@ -503,7 +485,7 @@ CRITICAL ADAPTIVE REPLANNING RULE: If the user tells you ANYTHING about their da
 FORMAT: Write your response, then on the very last line put the actions array if needed.
 Example:
 Done! Added the goal and noted your context.
-[{"type":"add_goal","name":"Learn guitar","area":"Learning","priority":"back"},{"type":"add_context","text":"User wants to learn guitar, mentioned as social/creative outlet"}]
+[{"type":"add_goal","name":"Learn guitar","area":"Learning","priority":"back"},{"type":"add_context","text":"User wants to learn guitar"}]
 
 If someone brain dumps stress or life context, use add_context to remember it and factor it into future plans.
 Be conversational and direct. Reference their actual data. Always confirm what you did.`,
@@ -554,7 +536,7 @@ Be conversational and direct. Reference their actual data. Always confirm what y
         [...tomorrowChatHistory.map(m => m.content), userMsg].join(". "),
         goals, tasks, habits
       );
-      setTomorrowChatHistory((prev) => [...prev, { role: "assistant", content: "Generated your plan for tomorrow based on your selected suggestions and what you told me. Check the plan above — tap any block to adjust." }]);
+      setTomorrowChatHistory((prev) => [...prev, { role: "assistant", content: "Generated your plan for tomorrow. Check it above — it'll automatically become your Today plan in the morning." }]);
     } else {
       setTomorrowChatHistory((prev) => [...prev, { role: "assistant", content: "Got it. Tell me anything else you want to include tomorrow, or say 'generate my plan' when ready." }]);
     }
@@ -571,20 +553,48 @@ Be conversational and direct. Reference their actual data. Always confirm what y
   const pendingTodayBlocks = todayPlan.filter((b) => !b.done && b.status !== "skipped");
   const progress = todayPlan.length ? Math.round((todayPlan.filter((b) => b.done).length / todayPlan.length) * 100) : 0;
 
-  const SUG_COLORS = { goal: "#8eaefb", task: "#f28b82", habit: "#edbe80", social: "#b8a0fc", recovery: "#81c995", other: "#706d68", pattern: "#f28b82", opportunity: "#8eaefb", longterm: "#b8a0fc", blindspot: "#f0c060", action: "#81c995" };
+  const SUG_COLORS = { goal: "#8eaefb", task: "#f28b82", habit: "#edbe80", social: "#b8a0fc", recovery: "#81c995", other: "#706d68" };
 
-  const navItems = [
-    { id: "today", label: "Today" },
-    { id: "tomorrow", label: "Tomorrow" },
-    { id: "chat", label: "Chat" },
-    { id: "suggestions", label: "Suggestions" },
-    { id: "journal", label: "Journal" },
-    { id: "goals", label: "Goals", badge: goals.length },
-    { id: "tasks", label: "Tasks", badge: tasks.filter((t) => !t.done).length },
-    { id: "habits", label: "Habits", badge: habits.length },
-    { id: "ideas", label: "Ideas", badge: ideas.length },
-    { id: "history", label: "History" },
+  const navSections = [
+    { title: "Plan", items: [
+      { id: "today", label: "Today" },
+      { id: "tomorrow", label: "Tomorrow" },
+      { id: "calendar", label: "Calendar" },
+    ]},
+    { title: "Chat", items: [
+      { id: "chat", label: "Chat" },
+    ]},
+    { title: "Organize", items: [
+      { id: "goals", label: "Goals", badge: goals.length },
+      { id: "tasks", label: "Tasks", badge: tasks.filter((t) => !t.done).length },
+      { id: "habits", label: "Habits", badge: habits.length },
+      { id: "ideas", label: "Ideas", badge: ideas.length },
+    ]},
+    { title: "Review", items: [
+      { id: "history", label: "History" },
+    ]},
   ];
+
+  const allNavItems = navSections.flatMap((sec) => sec.items);
+
+  // Calendar helpers
+  const calYear = calMonth.getFullYear();
+  const calMonthIdx = calMonth.getMonth();
+  const firstDayOfWeek = new Date(calYear, calMonthIdx, 1).getDay();
+  const daysInMonth = new Date(calYear, calMonthIdx + 1, 0).getDate();
+  const todayKey = dateKey(today);
+  const tomorrowKey = dateKey(tomorrow);
+
+  const dayHasData = (key) => {
+    if (planArchive[key]?.length) return true;
+    if (key === tomorrowKey && tomorrowPlan.length) return true;
+    const d = new Date(key + "T12:00:00");
+    return history.some((h) => h.date === histDateFormat(d));
+  };
+
+  const selectedDate = new Date(calSelected + "T12:00:00");
+  const selectedPlan = calSelected === tomorrowKey && tomorrowPlan.length ? tomorrowPlan : (planArchive[calSelected] || []);
+  const selectedHistory = history.find((h) => h.date === histDateFormat(selectedDate));
 
   const s = (obj) => obj;
 
@@ -599,20 +609,26 @@ Be conversational and direct. Reference their actual data. Always confirm what y
 
       {sidebarOpen && <div onClick={() => setSidebarOpen(false)} style={s({ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50 })} />}
 
+      {/* SIDEBAR — Option A grouped sections */}
       <div style={s({ position: "fixed", top: 0, left: 0, height: "100%", width: 220, background: "#22222a", borderRight: "1px solid rgba(255,255,255,0.09)", display: "flex", flexDirection: "column", zIndex: 60, transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.22s ease" })}>
-        <div style={s({ padding: "24px 20px 18px", display: "flex", alignItems: "flex-start", justifyContent: "space-between" })}>
+        <div style={s({ padding: "24px 20px 14px", display: "flex", alignItems: "flex-start", justifyContent: "space-between" })}>
           <div>
             <div style={s({ fontFamily: "Georgia,serif", fontSize: 21, fontStyle: "italic", color: "#f2efe9" })}>Locus</div>
             <div style={s({ fontSize: 11, color: "#706d68", marginTop: 3 })}>where focus lives</div>
           </div>
           <button onClick={() => setSidebarOpen(false)} style={s({ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 18, lineHeight: 1, marginTop: 2 })}>x</button>
         </div>
-        <nav style={s({ padding: "4px 10px", flex: 1, overflowY: "auto" })}>
-          {navItems.map((item) => (
-            <button key={item.id} onClick={() => { setTab(item.id); setSidebarOpen(false); }} style={s({ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: 7, cursor: "pointer", color: tab === item.id ? "#8eaefb" : "#b0aca6", background: tab === item.id ? "rgba(142,174,251,0.16)" : "none", border: "none", width: "100%", textAlign: "left", fontSize: 13, marginBottom: 1, fontWeight: tab === item.id ? 500 : 400 })}>
-              {item.label}
-              {item.badge !== undefined && <span style={s({ marginLeft: "auto", fontSize: 10, background: tab === item.id ? "rgba(142,174,251,0.28)" : "#32323e", color: tab === item.id ? "#8eaefb" : "#706d68", padding: "1px 6px", borderRadius: 99 })}>{item.badge}</span>}
-            </button>
+        <nav style={s({ padding: "0 10px", flex: 1, overflowY: "auto" })}>
+          {navSections.map((sec) => (
+            <div key={sec.title}>
+              <div style={s({ fontSize: 9, fontFamily: "monospace", color: "#4a4a55", textTransform: "uppercase", letterSpacing: "0.14em", padding: "12px 10px 4px" })}>{sec.title}</div>
+              {sec.items.map((item) => (
+                <button key={item.id} onClick={() => { setTab(item.id); setSidebarOpen(false); }} style={s({ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 7, cursor: "pointer", color: tab === item.id ? "#8eaefb" : "#b0aca6", background: tab === item.id ? "rgba(142,174,251,0.16)" : "none", border: "none", width: "100%", textAlign: "left", fontSize: 13, marginBottom: 1, fontWeight: tab === item.id ? 500 : 400 })}>
+                  {item.label}
+                  {item.badge !== undefined && <span style={s({ marginLeft: "auto", fontSize: 10, background: tab === item.id ? "rgba(142,174,251,0.28)" : "#32323e", color: tab === item.id ? "#8eaefb" : "#706d68", padding: "1px 6px", borderRadius: 99 })}>{item.badge}</span>}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
         <div style={s({ padding: "14px 20px", borderTop: "1px solid rgba(255,255,255,0.09)", fontSize: 11, color: "#706d68", fontFamily: "monospace" })}>
@@ -621,15 +637,17 @@ Be conversational and direct. Reference their actual data. Always confirm what y
         </div>
       </div>
 
+      {/* MAIN */}
       <div style={s({ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" })}>
 
         <div style={s({ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
           <button onClick={() => setSidebarOpen(true)} style={s({ background: "none", border: "none", cursor: "pointer", color: "#b0aca6", fontSize: 20, lineHeight: 1, flexShrink: 0 })}>&#9776;</button>
           <div style={s({ fontFamily: "Georgia,serif", fontSize: 16, fontStyle: "italic", color: "#f2efe9" })}>
-            {navItems.find(n => n.id === tab)?.label}
+            {allNavItems.find(n => n.id === tab)?.label}
           </div>
         </div>
 
+        {/* TODAY */}
         {tab === "today" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "16px 20px 14px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
@@ -651,7 +669,7 @@ Be conversational and direct. Reference their actual data. Always confirm what y
             </div>
             <div style={s({ flex: 1, overflowY: "auto" })}>
               {!todayPlan.length && <div style={s({ padding: "48px 20px", color: "#706d68", fontFamily: "monospace", fontSize: 12, textAlign: "center" })}>No plan yet. Hit Generate or plan tomorrow in the Tomorrow tab.</div>}
-              {doneTodayBlocks.map((b) => <PlanBlock key={b.id} block={b} onToggle={(id) => toggleBlock(id, "today")} onSkip={skipBlock} onReschedule={setRescheduleModal} onStart={startBlock} skipCount={skipPatterns[b.title] || 0} />)}
+              {doneTodayBlocks.map((b) => <PlanBlock key={b.id} block={b} onToggle={toggleBlock} onSkip={skipBlock} onReschedule={setRescheduleModal} onStart={startBlock} skipCount={skipPatterns[b.title] || 0} />)}
               {doneTodayBlocks.length > 0 && pendingTodayBlocks.length > 0 && (
                 <div style={s({ display: "flex", alignItems: "center", gap: 12, padding: "7px 16px 7px 48px" })}>
                   <div style={s({ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" })} />
@@ -659,11 +677,12 @@ Be conversational and direct. Reference their actual data. Always confirm what y
                   <div style={s({ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" })} />
                 </div>
               )}
-              {pendingTodayBlocks.map((b) => <PlanBlock key={b.id} block={b} onToggle={(id) => toggleBlock(id, "today")} onSkip={skipBlock} onReschedule={setRescheduleModal} onStart={startBlock} skipCount={skipPatterns[b.title] || 0} />)}
+              {pendingTodayBlocks.map((b) => <PlanBlock key={b.id} block={b} onToggle={toggleBlock} onSkip={skipBlock} onReschedule={setRescheduleModal} onStart={startBlock} skipCount={skipPatterns[b.title] || 0} />)}
             </div>
           </div>
         )}
 
+        {/* TOMORROW */}
         {tab === "tomorrow" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
@@ -680,7 +699,7 @@ Be conversational and direct. Reference their actual data. Always confirm what y
                   {tomorrowSuggestions.map((sug, i) => {
                     const isSelected = selectedSuggestions.includes(sug.title);
                     return (
-                      <div key={i} onClick={() => setSelectedSuggestions((prev) => isSelected ? prev.filter((s) => s !== sug.title) : [...prev, sug.title])} style={s({ background: isSelected ? "rgba(142,174,251,0.1)" : "#22222a", border: `1px solid ${isSelected ? "rgba(142,174,251,0.4)" : "rgba(255,255,255,0.09)"}`, borderRadius: 10, padding: "11px 14px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 10 })}>
+                      <div key={i} onClick={() => setSelectedSuggestions((prev) => isSelected ? prev.filter((x) => x !== sug.title) : [...prev, sug.title])} style={s({ background: isSelected ? "rgba(142,174,251,0.1)" : "#22222a", border: `1px solid ${isSelected ? "rgba(142,174,251,0.4)" : "rgba(255,255,255,0.09)"}`, borderRadius: 10, padding: "11px 14px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 10 })}>
                         <div style={s({ width: 8, height: 8, borderRadius: "50%", background: SUG_COLORS[sug.type] || "#706d68", flexShrink: 0, marginTop: 4 })} />
                         <div style={s({ flex: 1 })}>
                           <div style={s({ fontSize: 13, fontWeight: 500, color: "#f2efe9", marginBottom: 2 })}>{sug.title}</div>
@@ -730,6 +749,88 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
+        {/* CALENDAR */}
+        {tab === "calendar" && (
+          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
+            <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
+
+              <div style={s({ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 })}>
+                <button onClick={() => setCalMonth(new Date(calYear, calMonthIdx - 1, 1))} style={s({ background: "none", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 6, padding: "5px 12px", fontSize: 13, color: "#b0aca6", cursor: "pointer" })}>‹</button>
+                <div style={s({ fontFamily: "Georgia,serif", fontSize: 17, fontStyle: "italic", color: "#f2efe9" })}>
+                  {calMonth.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+                </div>
+                <button onClick={() => setCalMonth(new Date(calYear, calMonthIdx + 1, 1))} style={s({ background: "none", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 6, padding: "5px 12px", fontSize: 13, color: "#b0aca6", cursor: "pointer" })}>›</button>
+              </div>
+
+              <div style={s({ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 6 })}>
+                {["S","M","T","W","T","F","S"].map((d, i) => (
+                  <div key={i} style={s({ textAlign: "center", fontSize: 10, fontFamily: "monospace", color: "#4a4a55", padding: "4px 0" })}>{d}</div>
+                ))}
+              </div>
+
+              <div style={s({ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 18 })}>
+                {Array.from({ length: firstDayOfWeek }).map((_, i) => <div key={"e" + i} />)}
+                {Array.from({ length: daysInMonth }).map((_, i) => {
+                  const dayNum = i + 1;
+                  const key = `${calYear}-${String(calMonthIdx + 1).padStart(2, "0")}-${String(dayNum).padStart(2, "0")}`;
+                  const isToday = key === todayKey;
+                  const isTomorrow = key === tomorrowKey;
+                  const isSelected = key === calSelected;
+                  const hasData = dayHasData(key);
+                  return (
+                    <div key={key} onClick={() => setCalSelected(key)} style={s({ aspectRatio: "1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, borderRadius: 8, cursor: "pointer", background: isSelected ? "rgba(142,174,251,0.16)" : isToday ? "#2a2a34" : "none", border: isSelected ? "1px solid rgba(142,174,251,0.4)" : isToday ? "1px solid rgba(255,255,255,0.14)" : "1px solid transparent" })}>
+                      <div style={s({ fontSize: 12, color: isSelected ? "#8eaefb" : isToday ? "#f2efe9" : isTomorrow ? "#b0aca6" : "#706d68", fontWeight: isToday || isSelected ? 500 : 400 })}>{dayNum}</div>
+                      {hasData && <div style={s({ width: 4, height: 4, borderRadius: "50%", background: isSelected ? "#8eaefb" : "#4a4a55" })} />}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 })}>
+                {selectedDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+                {calSelected === todayKey ? " — today" : calSelected === tomorrowKey ? " — tomorrow" : ""}
+              </div>
+
+              {!selectedPlan.length && !selectedHistory && (
+                <div style={s({ color: "#706d68", fontSize: 12, fontFamily: "monospace", padding: "12px 0" })}>nothing recorded for this day</div>
+              )}
+
+              {selectedPlan.length > 0 && (
+                <div style={s({ marginBottom: 16 })}>
+                  {selectedPlan.map((b) => (
+                    <div key={b.id} style={s({ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 10, padding: "11px 14px", marginBottom: 7, opacity: b.done || b.status === "skipped" ? 0.45 : 1 })}>
+                      <div style={s({ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 })}>
+                        <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#8eaefb" })}>{b.time}</div>
+                        {b.duration && <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68" })}>{b.duration}</div>}
+                        <ImpDots imp={b.imp || 2} />
+                        {b.done && <span style={s({ marginLeft: "auto", fontSize: 10, fontFamily: "monospace", color: "#81c995" })}>✓ done</span>}
+                        {b.status === "skipped" && <span style={s({ marginLeft: "auto", fontSize: 10, fontFamily: "monospace", color: "#706d68" })}>skipped</span>}
+                      </div>
+                      <div style={s({ fontSize: 13, fontWeight: 500, color: "#f2efe9", textDecoration: b.done || b.status === "skipped" ? "line-through" : "none" })}>{b.title}</div>
+                      <div style={s({ fontSize: 12, color: "#b0aca6", lineHeight: 1.5, marginTop: 2 })}>{b.desc}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {selectedHistory && (
+                <div>
+                  <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#4a4a55", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 })}>Activity log</div>
+                  {selectedHistory.entries.map((e, ei) => (
+                    <div key={ei} style={s({ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 12, color: "#b0aca6" })}>
+                      <span style={s({ color: e.type === "task" ? "#81c995" : e.type === "habit" ? "#edbe80" : "#706d68", fontSize: 11 })}>{e.type === "task" ? "✓" : e.type === "habit" ? "⚡" : "•"}</span>
+                      <span style={s({ flex: 1 })}>{e.text}</span>
+                      {e.time && <span style={s({ fontSize: 10, fontFamily: "monospace", color: "#4a4a55" })}>{e.time}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+            </div>
+          </div>
+        )}
+
+        {/* CHAT */}
         {tab === "chat" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "16px 20px" })}>
@@ -749,60 +850,7 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
-        {tab === "suggestions" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end", flexShrink: 0 })}>
-              <button onClick={loadSuggestions} disabled={suggestionsLoading} style={s({ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer", opacity: suggestionsLoading ? 0.6 : 1 })}>{suggestionsLoading ? "Analyzing..." : "↻ Refresh"}</button>
-            </div>
-            <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
-              {!suggestions.length && <div style={s({ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "48px 0" })}>Hit Refresh — Claude will analyze your goals, habits, journal entries, patterns, and search the web to surface insights and ideas.</div>}
-              {suggestions.map((sug, i) => (
-                <div key={i} style={s({ background: "#22222a", border: `1px solid rgba(255,255,255,0.09)`, borderLeft: `3px solid ${SUG_COLORS[sug.type] || "#706d68"}`, borderRadius: 12, padding: "14px 16px", marginBottom: 10 })}>
-                  <div style={s({ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 })}>
-                    <div style={s({ fontSize: 10, fontFamily: "monospace", color: SUG_COLORS[sug.type] || "#706d68", textTransform: "uppercase", letterSpacing: "0.08em" })}>{sug.type}</div>
-                    <ImpDots imp={sug.imp || 1} />
-                  </div>
-                  <div style={s({ fontSize: 14, fontWeight: 500, color: "#f2efe9", marginBottom: 6 })}>{sug.title}</div>
-                  <div style={s({ fontSize: 13, color: "#b0aca6", lineHeight: 1.6 })}>{sug.desc}</div>
-                  <div style={s({ display: "flex", gap: 6, marginTop: 10 })}>
-                    <button onClick={() => { setChatInput(`Tell me more about: ${sug.title}`); setTab("chat"); }} style={s({ fontSize: 11, fontFamily: "monospace", padding: "4px 10px", borderRadius: 6, border: "1px solid rgba(255,255,255,0.09)", background: "none", color: "#706d68", cursor: "pointer" })}>discuss in chat →</button>
-                    {sug.type === "action" && <button onClick={() => { setChatInput(`Add task: ${sug.title}`); setTab("chat"); }} style={s({ fontSize: 11, fontFamily: "monospace", padding: "4px 10px", borderRadius: 6, border: "1px solid rgba(142,174,251,0.3)", background: "rgba(142,174,251,0.1)", color: "#8eaefb", cursor: "pointer" })}>add as task</button>}
-                    {sug.type === "longterm" && <button onClick={() => { setChatInput(`Add goal: ${sug.title}`); setTab("chat"); }} style={s({ fontSize: 11, fontFamily: "monospace", padding: "4px 10px", borderRadius: 6, border: "1px solid rgba(184,160,252,0.3)", background: "rgba(184,160,252,0.1)", color: "#b8a0fc", cursor: "pointer" })}>add as goal</button>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {tab === "journal" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
-              <div style={s({ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 })}>
-                <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", marginBottom: 8 })}>{today.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}</div>
-                <textarea value={journalInput} onChange={(e) => setJournalInput(e.target.value)} placeholder="How did today go? What's on your mind? No pressure — write whatever feels right." style={s({ width: "100%", background: "none", border: "none", outline: "none", fontSize: 13, color: "#f2efe9", lineHeight: 1.7, resize: "none", minHeight: 120, fontFamily: "'Geist','Inter',sans-serif" })} />
-                <button onClick={saveJournal} style={s({ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 16px", fontSize: 12, fontWeight: 500, cursor: "pointer", marginTop: 8 })}>Save entry</button>
-              </div>
-              <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 })}>Past entries</div>
-              {!journal.length && <div style={s({ color: "#706d68", fontSize: 12, fontFamily: "monospace", padding: "12px 0" })}>no entries yet</div>}
-              {journal.map((j, i) => (
-                <div key={i} style={s({ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 12, padding: "14px 16px", marginBottom: 10 })}>
-                  <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", marginBottom: 8 })}>{j.date}</div>
-                  <div style={s({ fontSize: 13, color: "#b0aca6", lineHeight: 1.7, whiteSpace: "pre-wrap" })}>{j.text}</div>
-                  {history.find((h) => h.date === j.date) && (
-                    <div style={s({ marginTop: 10, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.06)" })}>
-                      <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68", marginBottom: 6 })}>Completed that day</div>
-                      {history.find((h) => h.date === j.date)?.entries.filter((e) => e.type === "task").slice(0, 5).map((e, ei) => (
-                        <div key={ei} style={s({ fontSize: 12, color: "#706d68", padding: "2px 0" })}>✓ {e.text.replace("Completed: ", "")}</div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
+        {/* GOALS */}
         {tab === "goals" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" })}>
@@ -828,6 +876,7 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
+        {/* TASKS */}
         {tab === "tasks" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" })}>
@@ -847,6 +896,7 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
+        {/* HABITS */}
         {tab === "habits" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" })}>
@@ -888,6 +938,7 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
+        {/* IDEAS */}
         {tab === "ideas" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
@@ -907,6 +958,7 @@ Be conversational and direct. Reference their actual data. Always confirm what y
           </div>
         )}
 
+        {/* HISTORY */}
         {tab === "history" && (
           <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
             <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
@@ -931,6 +983,7 @@ Be conversational and direct. Reference their actual data. Always confirm what y
         )}
       </div>
 
+      {/* MODALS */}
       {goalModal && (
         <Modal onClose={() => setGoalModal(null)} title={goalModal.id ? "Edit goal" : "Add goal"}>
           <Field label="Goal name"><input value={goalModal.name} onChange={(e) => setGoalModal((m) => ({ ...m, name: e.target.value }))} placeholder="e.g. Land a fintech role" /></Field>
