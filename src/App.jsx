@@ -1,37 +1,65 @@
 import { useState, useEffect, useRef } from "react";
 import "./App.css";
 
-const STORAGE_KEYS = {
+const KEYS = {
   goals: "locus-goals",
   tasks: "locus-tasks",
   habits: "locus-habits",
   ideas: "locus-ideas",
   todayPlan: "locus-today-plan",
   tomorrowPlan: "locus-tomorrow-plan",
+  tomorrowDate: "locus-tomorrow-date",
   history: "locus-history",
   skipPatterns: "locus-skip-patterns",
   timestamps: "locus-timestamps",
   context: "locus-context",
   planArchive: "locus-plan-archive",
+  lastOpen: "locus-last-open",
 };
 
 function load(key, fallback) {
   try {
     const v = localStorage.getItem(key);
     return v ? JSON.parse(v) : fallback;
-  } catch { return fallback; }
+  } catch {
+    return fallback;
+  }
 }
 
 function save(key, val) {
-  localStorage.setItem(key, JSON.stringify(val));
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch {}
 }
 
-function dateKey(d) {
+function isoKey(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function histDateFormat(d) {
+function prettyDate(d) {
   return d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+}
+
+function daysBetween(aKey, bKey) {
+  const a = new Date(aKey + "T12:00:00");
+  const b = new Date(bKey + "T12:00:00");
+  return Math.round((b - a) / 86400000);
+}
+
+function uid() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+function norm(str) {
+  return (str || "").trim().toLowerCase();
+}
+
+function extractJSONArray(text) {
+  const clean = text.replace(/```json/g, "").replace(/```/g, "").trim();
+  const start = clean.indexOf("[");
+  const end = clean.lastIndexOf("]");
+  if (start === -1 || end === -1 || end <= start) throw new Error("No JSON array found");
+  return JSON.parse(clean.slice(start, end + 1));
 }
 
 async function callClaude(system, messages, useWebSearch = false) {
@@ -41,42 +69,85 @@ async function callClaude(system, messages, useWebSearch = false) {
     body: JSON.stringify({ system, messages, useWebSearch }),
   });
   const data = await res.json();
-  return data.content?.[0]?.text || "Something went wrong.";
+  if (data.error) throw new Error(data.error);
+  return data.content?.[0]?.text || "";
 }
 
-function buildContext(goals, tasks, habits, ideas, skipPatterns, timestamps, context) {
+function buildContext({ goals, tasks, habits, ideas, skipPatterns, timestamps, context }) {
   const ord = ["front", "maint", "back"];
   const sorted = [...goals].sort((a, b) => ord.indexOf(a.p) - ord.indexOf(b.p));
-  const fp = sorted.filter((g) => g.p === "front");
-  const mp = sorted.filter((g) => g.p === "maint");
-  const bp = sorted.filter((g) => g.p === "back");
-  const fg = (arr) => arr.length ? arr.map((g) => `- [id:${g.id}] ${g.name} (${g.area})${g.deadline ? ", by " + g.deadline : ""}${g.desc ? ": " + g.desc : ""}`).join("\n") : "None";
-  const pt = tasks.filter((t) => !t.done);
-  const ft = pt.length ? pt.map((t) => `- [id:${t.id}] ${t.name}${t.due ? ", due " + t.due : ""}${t.goal ? " [goal: " + t.goal + "]" : ""}${t.imp ? " [importance: " + t.imp + "/3]" : ""}`).join("\n") : "None";
-  const patterns = Object.entries(skipPatterns).filter(([, c]) => c >= 2).map(([k, c]) => `- "${k}" skipped ${c}x`).join("\n") || "None";
-  const habitCtx = habits.map((h) => `- [id:${h.id}] ${h.name} (${h.freq})${h.note ? ": " + h.note : ""}, streak: ${h.streak} days`).join("\n") || "None";
-  const tsCtx = Object.entries(timestamps).slice(0, 10).map(([k, v]) => `- ${k}: avg ${v.avg} min, ${v.count} completions`).join("\n") || "None";
-  const ctxNotes = context.slice(0, 3).map((c) => `- ${c.date}: ${c.text}`).join("\n") || "None";
-  return `USER CONTEXT:
+  const group = (p) => {
+    const arr = sorted.filter((g) => g.p === p);
+    return arr.length
+      ? arr
+          .map(
+            (g) =>
+              `- [id:${g.id}] ${g.name} (${g.area})${g.deadline ? ", by " + g.deadline : ""}${
+                g.desc ? ": " + g.desc : ""
+              }`
+          )
+          .join("\n")
+      : "None";
+  };
 
-LONG-TERM GOALS:
-Front burner:
-${fg(fp)}
-Maintenance:
-${fg(mp)}
-Back burner:
-${fg(bp)}
+  const pending = tasks.filter((t) => !t.done);
+  const taskCtx = pending.length
+    ? pending
+        .map(
+          (t) =>
+            `- [id:${t.id}] ${t.name}${t.due ? ", due " + t.due : ""}${
+              t.goal ? " [goal: " + t.goal + "]" : ""
+            } [importance: ${t.imp || 2}/3]`
+        )
+        .join("\n")
+    : "None";
+
+  const habitCtx = habits.length
+    ? habits
+        .map(
+          (h) =>
+            `- [id:${h.id}] ${h.name} (${h.freq || "no set frequency"})${
+              h.note ? " - " + h.note : ""
+            }, streak: ${h.streak || 0}`
+        )
+        .join("\n")
+    : "NONE. The user has zero habits right now.";
+
+  const patterns =
+    Object.entries(skipPatterns)
+      .filter(([, c]) => c >= 2)
+      .map(([k, c]) => `- "${k}" skipped or moved ${c}x`)
+      .join("\n") || "None";
+
+  const tsCtx =
+    Object.entries(timestamps)
+      .slice(0, 12)
+      .map(([k, v]) => `- ${k}: usually takes about ${v.avg} min (${v.count} logged)`)
+      .join("\n") || "None yet";
+
+  const ctxNotes = context.slice(0, 5).map((c) => `- ${c.date}: ${c.text}`).join("\n") || "None";
+
+  return `USER CONTEXT
+
+GOALS - front burner:
+${group("front")}
+
+GOALS - maintenance:
+${group("maint")}
+
+GOALS - back burner:
+${group("back")}
 
 PENDING TASKS:
-${ft}
+${taskCtx}
 
-HABITS:
+HABITS (complete and only list):
 ${habitCtx}
 
 SKIP PATTERNS:
 ${patterns}
 
-COMPLETION TIME DATA:
+HOW LONG THINGS ACTUALLY TAKE:
 ${tsCtx}
 
 LIFE CONTEXT NOTES:
@@ -86,13 +157,37 @@ IDEAS PARKING LOT:
 ${ideas.map((i) => `- [id:${i.id}] ${i.t}`).join("\n") || "None"}`;
 }
 
+const PLAN_RULES = `PLAN RULES:
+- No clock times unless the user explicitly gave one. Use a phase of day for "time": Morning, Late morning, Midday, Afternoon, Evening, Night.
+- Every block needs an approximate duration string like "~45 min", "~1 hr", "~2 hr".
+- Order blocks in the sequence they should happen.
+- Front burner goals get the most time. Back burner only if there is room.
+- Do NOT invent habits. Only reference habits from the HABITS list. If that list says NONE, include no habit-style recurring blocks at all.
+- Do not create a separate block for a habit unless it genuinely needs dedicated time.
+- Include exactly one flex or buffer block.
+- Use the completion time data to size blocks realistically.
+- If something appears in SKIP PATTERNS, place it at a different point in the day rather than the same slot.
+- 5 to 8 blocks total. Descriptions must be specific and actionable, never generic.
+- Respond with ONLY a JSON array. No prose, no markdown fences.
+Format: [{"time":"Morning","title":"...","desc":"...","imp":3,"duration":"~90 min"}]
+imp is 1, 2, or 3.`;
+
 const IMP_COLORS = ["", "#706d68", "#8eaefb", "#f28b82"];
 
-function ImpDots({ imp, size = 7 }) {
+function ImpDots({ imp }) {
+  const level = Math.min(3, Math.max(1, imp || 2));
   return (
     <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
       {[1, 2, 3].map((i) => (
-        <div key={i} style={{ width: size, height: size, borderRadius: "50%", background: i <= imp ? IMP_COLORS[imp] : "#32323e" }} />
+        <div
+          key={i}
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: "50%",
+            background: i <= level ? IMP_COLORS[level] : "#32323e",
+          }}
+        />
       ))}
     </div>
   );
@@ -101,611 +196,1025 @@ function ImpDots({ imp, size = 7 }) {
 export default function App() {
   const [tab, setTab] = useState("today");
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [goals, setGoals] = useState(() => load(STORAGE_KEYS.goals, []));
-  const [tasks, setTasks] = useState(() => load(STORAGE_KEYS.tasks, []));
-  const [habits, setHabits] = useState(() => load(STORAGE_KEYS.habits, []));
-  const [ideas, setIdeas] = useState(() => load(STORAGE_KEYS.ideas, []));
-  const [todayPlan, setTodayPlan] = useState(() => load(STORAGE_KEYS.todayPlan, []));
-  const [tomorrowPlan, setTomorrowPlan] = useState(() => load(STORAGE_KEYS.tomorrowPlan, []));
-  const [planArchive, setPlanArchive] = useState(() => load(STORAGE_KEYS.planArchive, {}));
+
+  const [goals, setGoals] = useState(() => load(KEYS.goals, []));
+  const [tasks, setTasks] = useState(() => load(KEYS.tasks, []));
+  const [habits, setHabits] = useState(() => load(KEYS.habits, []));
+  const [ideas, setIdeas] = useState(() => load(KEYS.ideas, []));
+  const [todayPlan, setTodayPlan] = useState(() => load(KEYS.todayPlan, []));
+  const [tomorrowPlan, setTomorrowPlan] = useState(() => load(KEYS.tomorrowPlan, []));
+  const [planArchive, setPlanArchive] = useState(() => load(KEYS.planArchive, {}));
+  const [history, setHistory] = useState(() => load(KEYS.history, []));
+  const [skipPatterns, setSkipPatterns] = useState(() => load(KEYS.skipPatterns, {}));
+  const [timestamps, setTimestamps] = useState(() => load(KEYS.timestamps, {}));
+  const [context, setContext] = useState(() => load(KEYS.context, []));
+
   const [tomorrowSuggestions, setTomorrowSuggestions] = useState([]);
   const [selectedSuggestions, setSelectedSuggestions] = useState([]);
-  const [history, setHistory] = useState(() => load(STORAGE_KEYS.history, []));
-  const [skipPatterns, setSkipPatterns] = useState(() => load(STORAGE_KEYS.skipPatterns, {}));
-  const [timestamps, setTimestamps] = useState(() => load(STORAGE_KEYS.timestamps, {}));
-  const [context, setContext] = useState(() => load(STORAGE_KEYS.context, []));
+
   const [chatHistory, setChatHistory] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
-  const [tomorrowChatHistory, setTomorrowChatHistory] = useState([]);
-  const [tomorrowChatInput, setTomorrowChatInput] = useState("");
-  const [tomorrowChatLoading, setTomorrowChatLoading] = useState(false);
+
+  const [tmrChat, setTmrChat] = useState([]);
+  const [tmrInput, setTmrInput] = useState("");
+  const [tmrLoading, setTmrLoading] = useState(false);
+
   const [planLoading, setPlanLoading] = useState(false);
-  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
+  const [sugLoading, setSugLoading] = useState(false);
+
   const [goalModal, setGoalModal] = useState(null);
   const [taskModal, setTaskModal] = useState(null);
   const [habitModal, setHabitModal] = useState(null);
-  const [rescheduleModal, setRescheduleModal] = useState(null);
+  const [rescheduleId, setRescheduleId] = useState(null);
   const [rescheduleReason, setRescheduleReason] = useState("");
   const [rescheduleTime, setRescheduleTime] = useState("");
+
   const [ideaInput, setIdeaInput] = useState("");
   const [toasts, setToasts] = useState([]);
-  const [calMonth, setCalMonth] = useState(() => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), 1); });
-  const [calSelected, setCalSelected] = useState(() => dateKey(new Date()));
-  const chatBottomRef = useRef(null);
-  const tomorrowChatBottomRef = useRef(null);
 
-  useEffect(() => { save(STORAGE_KEYS.goals, goals); }, [goals]);
-  useEffect(() => { save(STORAGE_KEYS.tasks, tasks); }, [tasks]);
-  useEffect(() => { save(STORAGE_KEYS.habits, habits); }, [habits]);
-  useEffect(() => { save(STORAGE_KEYS.ideas, ideas); }, [ideas]);
-  useEffect(() => { save(STORAGE_KEYS.todayPlan, todayPlan); }, [todayPlan]);
-  useEffect(() => { save(STORAGE_KEYS.tomorrowPlan, tomorrowPlan); }, [tomorrowPlan]);
-  useEffect(() => { save(STORAGE_KEYS.history, history); }, [history]);
-  useEffect(() => { save(STORAGE_KEYS.skipPatterns, skipPatterns); }, [skipPatterns]);
-  useEffect(() => { save(STORAGE_KEYS.timestamps, timestamps); }, [timestamps]);
-  useEffect(() => { save(STORAGE_KEYS.context, context); }, [context]);
-  useEffect(() => { save(STORAGE_KEYS.planArchive, planArchive); }, [planArchive]);
-  useEffect(() => { chatBottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatHistory, chatLoading]);
-  useEffect(() => { tomorrowChatBottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [tomorrowChatHistory, tomorrowChatLoading]);
+  const now = new Date();
+  const todayK = isoKey(now);
+  const tomorrowDate = new Date(now.getTime() + 86400000);
+  const tomorrowK = isoKey(tomorrowDate);
 
-  // Archive today's plan by date so Calendar can show past days
+  const [calMonth, setCalMonth] = useState(() => new Date(now.getFullYear(), now.getMonth(), 1));
+  const [calSelected, setCalSelected] = useState(todayK);
+
+  const chatEndRef = useRef(null);
+  const tmrEndRef = useRef(null);
+  const rolledRef = useRef(false);
+
+  useEffect(() => save(KEYS.goals, goals), [goals]);
+  useEffect(() => save(KEYS.tasks, tasks), [tasks]);
+  useEffect(() => save(KEYS.habits, habits), [habits]);
+  useEffect(() => save(KEYS.ideas, ideas), [ideas]);
+  useEffect(() => save(KEYS.todayPlan, todayPlan), [todayPlan]);
+  useEffect(() => save(KEYS.tomorrowPlan, tomorrowPlan), [tomorrowPlan]);
+  useEffect(() => save(KEYS.history, history), [history]);
+  useEffect(() => save(KEYS.skipPatterns, skipPatterns), [skipPatterns]);
+  useEffect(() => save(KEYS.timestamps, timestamps), [timestamps]);
+  useEffect(() => save(KEYS.context, context), [context]);
+  useEffect(() => save(KEYS.planArchive, planArchive), [planArchive]);
+
   useEffect(() => {
-    if (todayPlan.length) {
-      setPlanArchive((prev) => ({ ...prev, [dateKey(new Date())]: todayPlan }));
-    }
-  }, [todayPlan]);
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatHistory, chatLoading]);
 
-  // Roll tomorrow's plan into today when the day arrives
   useEffect(() => {
-    const targetDate = localStorage.getItem("locus-tomorrow-date");
-    if (targetDate && targetDate === dateKey(new Date())) {
-      const tPlan = load(STORAGE_KEYS.tomorrowPlan, []);
-      if (tPlan.length) {
-        setTodayPlan(tPlan.map((b) => ({ ...b, done: false, status: "pending", startTime: null })));
-        setTomorrowPlan([]);
-        localStorage.removeItem("locus-tomorrow-date");
-      }
-    }
-  }, []);
+    tmrEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [tmrChat, tmrLoading]);
 
-  const addToast = (msg) => {
-    const id = Date.now();
+  useEffect(() => {
+    if (todayPlan.length) setPlanArchive((prev) => ({ ...prev, [todayK]: todayPlan }));
+  }, [todayPlan, todayK]);
+
+  useEffect(() => {
+    if (rolledRef.current) return;
+    rolledRef.current = true;
+
+    const lastOpen = load(KEYS.lastOpen, null);
+    save(KEYS.lastOpen, todayK);
+
+    if (lastOpen && lastOpen !== todayK) {
+      const gap = Math.max(1, daysBetween(lastOpen, todayK));
+      setHabits((prev) =>
+        prev.map((h) => {
+          const stale = !h.lastTicked || daysBetween(h.lastTicked, todayK) > 1;
+          let week = [...(h.week || [0, 0, 0, 0, 0, 0, 0])];
+          for (let i = 0; i < Math.min(gap, 7); i++) {
+            week.shift();
+            week.push(0);
+          }
+          return { ...h, tickedToday: false, streak: stale ? 0 : h.streak || 0, week };
+        })
+      );
+    }
+
+    const targetDate = load(KEYS.tomorrowDate, null);
+    const stored = load(KEYS.tomorrowPlan, []);
+    if (targetDate && stored.length && daysBetween(targetDate, todayK) >= 0) {
+      setTodayPlan(stored.map((b) => ({ ...b, id: uid(), done: false, status: "pending", startTime: null })));
+      setTomorrowPlan([]);
+      localStorage.removeItem(KEYS.tomorrowDate);
+    }
+  }, [todayK]);
+
+  const toast = (msg) => {
+    const id = uid();
     setToasts((p) => [...p, { id, msg }]);
-    setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 3000);
+    setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 2800);
   };
 
-  const addHistory = (type, text) => {
-    const today = histDateFormat(new Date());
+  const logHistory = (type, text) => {
+    const label = prettyDate(new Date());
     setHistory((prev) => {
       const next = [...prev];
-      if (!next.length || next[0].date !== today) next.unshift({ date: today, entries: [] });
-      next[0].entries.unshift({ type, text, time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }) });
-      return next;
+      if (!next.length || next[0].date !== label) next.unshift({ date: label, key: todayK, entries: [] });
+      next[0] = {
+        ...next[0],
+        entries: [
+          {
+            type,
+            text,
+            time: new Date().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }),
+          },
+          ...next[0].entries,
+        ],
+      };
+      return next.slice(0, 60);
     });
   };
 
-  const logTimestamp = (blockTitle, startTime) => {
+  const noteContext = (text) => {
+    setContext((prev) => {
+      if (prev.some((c) => norm(c.text) === norm(text))) return prev;
+      return [
+        { date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), text },
+        ...prev,
+      ].slice(0, 12);
+    });
+  };
+
+  const bumpSkip = (title) => setSkipPatterns((sp) => ({ ...sp, [title]: (sp[title] || 0) + 1 }));
+
+  const recordDuration = (title, startTime) => {
     if (!startTime) return;
-    const duration = Math.round((Date.now() - startTime) / 60000);
-    if (duration < 1 || duration > 480) return;
+    const mins = Math.round((Date.now() - startTime) / 60000);
+    if (mins < 2 || mins > 600) return;
     setTimestamps((prev) => {
-      const existing = prev[blockTitle] || { avg: 0, count: 0 };
-      const newAvg = Math.round((existing.avg * existing.count + duration) / (existing.count + 1));
-      return { ...prev, [blockTitle]: { avg: newAvg, count: existing.count + 1 } };
+      const ex = prev[title] || { avg: 0, count: 0 };
+      const avg = Math.round((ex.avg * ex.count + mins) / (ex.count + 1));
+      return { ...prev, [title]: { avg, count: ex.count + 1 } };
     });
   };
 
-  const applyActions = (actions, g, t, h, i) => {
-    let gs = [...g], ts = [...t], hs = [...h], is = [...i];
-    let needsPlan = false, needsTomorrowPlan = false;
+  const matches = (item, action, field) => {
+    if (action.id) return item.id === action.id;
+    const q = norm(action.name || action.text);
+    if (!q) return false;
+    const v = norm(item[field]);
+    return v.includes(q) || q.includes(v);
+  };
 
-    for (const action of actions) {
-      switch (action.type) {
+  function applyActions(actions, snap) {
+    let { gs, ts, hs, is } = snap;
+    let wantPlan = false;
+    let wantTomorrow = false;
+
+    for (const a of actions) {
+      if (!a || !a.type) continue;
+      switch (a.type) {
         case "add_goal": {
-          const ng = { id: Date.now().toString() + Math.random(), name: action.name, area: action.area || "Other", desc: action.desc || "", deadline: action.deadline || "", p: action.priority || "maint" };
-          gs = [...gs, ng];
-          addToast(`Added goal: ${ng.name}`);
+          if (!a.name || gs.some((g) => norm(g.name) === norm(a.name))) break;
+          gs = [
+            ...gs,
+            {
+              id: uid(),
+              name: a.name,
+              area: a.area || "Other",
+              desc: a.desc || "",
+              deadline: a.deadline || "",
+              p: a.priority || "maint",
+            },
+          ];
+          toast("Added goal: " + a.name);
           break;
         }
-        case "edit_goal":
-          gs = gs.map((x) => x.id === action.id ? { ...x, ...action.updates } : x);
-          addToast("Updated goal");
+        case "edit_goal": {
+          gs = gs.map((g) => (matches(g, a, "name") ? { ...g, ...(a.updates || {}) } : g));
+          toast("Updated goal");
           break;
-        case "delete_goal":
-          gs = gs.filter((x) => x.id !== action.id);
-          addToast("Deleted goal");
+        }
+        case "delete_goal": {
+          const before = gs.length;
+          gs = gs.filter((g) => !matches(g, a, "name"));
+          if (gs.length < before) toast("Deleted goal");
           break;
-        case "set_goal_priority":
-          gs = gs.map((x) => x.name.toLowerCase().includes((action.name || "").toLowerCase()) ? { ...x, p: action.priority } : x);
-          addToast("Updated priority");
+        }
+        case "set_goal_priority": {
+          if (!a.priority) break;
+          gs = gs.map((g) => (matches(g, a, "name") ? { ...g, p: a.priority } : g));
+          toast("Updated priority");
           break;
+        }
         case "promote_idea": {
-          const idea = is.find((x) => x.id === action.id || x.t.toLowerCase().includes((action.text || "").toLowerCase()));
-          if (idea) {
-            gs = [...gs, { id: Date.now().toString(), name: idea.t, area: action.area || "Other", desc: "", deadline: "", p: action.priority || "back" }];
-            is = is.filter((x) => x.id !== idea.id);
-            addToast(`Promoted idea to goal: ${idea.t}`);
+          const idea = is.find((i) => matches(i, a, "t"));
+          if (!idea) break;
+          if (!gs.some((g) => norm(g.name) === norm(idea.t))) {
+            gs = [
+              ...gs,
+              {
+                id: uid(),
+                name: idea.t,
+                area: a.area || "Other",
+                desc: "",
+                deadline: "",
+                p: a.priority || "back",
+              },
+            ];
           }
+          is = is.filter((i) => i.id !== idea.id);
+          toast("Promoted to goal");
           break;
         }
         case "add_task": {
-          const nt = { id: Date.now().toString() + Math.random(), name: action.name, due: action.due || "", goal: action.goal || "", desc: action.desc || "", imp: action.importance || 2, done: false };
-          ts = [...ts, nt];
-          addToast(`Added task: ${nt.name}`);
+          if (!a.name || ts.some((t) => !t.done && norm(t.name) === norm(a.name))) break;
+          ts = [
+            ...ts,
+            { id: uid(), name: a.name, due: a.due || "", goal: a.goal || "", imp: a.importance || 2, done: false },
+          ];
+          toast("Added task: " + a.name);
           break;
         }
-        case "complete_task":
-          ts = ts.map((x) => {
-            const match = action.id ? x.id === action.id : x.name.toLowerCase().includes((action.name || "").toLowerCase());
-            if (match && !x.done) addHistory("task", `Completed: ${x.name}`);
-            return match ? { ...x, done: true } : x;
+        case "edit_task": {
+          ts = ts.map((t) => (matches(t, a, "name") ? { ...t, ...(a.updates || {}) } : t));
+          toast("Updated task");
+          break;
+        }
+        case "complete_task": {
+          let hit = false;
+          ts = ts.map((t) => {
+            if (matches(t, a, "name") && !t.done) {
+              hit = true;
+              logHistory("task", "Completed: " + t.name);
+              return { ...t, done: true };
+            }
+            return t;
           });
-          addToast("Task completed");
+          if (hit) toast("Task completed");
           break;
-        case "uncomplete_task":
-          ts = ts.map((x) => {
-            const match = action.id ? x.id === action.id : x.name.toLowerCase().includes((action.name || "").toLowerCase());
-            return match ? { ...x, done: false } : x;
-          });
-          addToast("Task reopened");
+        }
+        case "uncomplete_task": {
+          ts = ts.map((t) => (matches(t, a, "name") ? { ...t, done: false } : t));
+          toast("Task reopened");
           break;
-        case "delete_task":
-          ts = ts.filter((x) => x.id !== action.id && !x.name.toLowerCase().includes((action.name || "").toLowerCase()));
-          addToast("Deleted task");
+        }
+        case "delete_task": {
+          const before = ts.length;
+          ts = ts.filter((t) => !matches(t, a, "name"));
+          if (ts.length < before) toast("Deleted task");
           break;
+        }
         case "add_habit": {
-          const nh = { id: Date.now().toString() + Math.random(), name: action.name, freq: action.freq || "daily", note: action.note || "", streak: 0, history: [0,0,0,0,0,0,0], tickedToday: false };
-          hs = [...hs, nh];
-          addToast(`Added habit: ${nh.name}`);
+          if (!a.name || hs.some((h) => norm(h.name) === norm(a.name))) break;
+          hs = [
+            ...hs,
+            {
+              id: uid(),
+              name: a.name,
+              freq: a.freq || "daily",
+              note: a.note || "",
+              streak: 0,
+              week: [0, 0, 0, 0, 0, 0, 0],
+              tickedToday: false,
+              lastTicked: null,
+            },
+          ];
+          toast("Added habit: " + a.name);
           break;
         }
-        case "tick_habit":
-          hs = hs.map((x) => {
-            const match = action.id ? x.id === action.id : x.name.toLowerCase().includes((action.name || "").toLowerCase());
-            if (!match) return x;
-            const ticked = action.value !== undefined ? action.value : true;
-            if (ticked) addHistory("habit", `Habit done: ${x.name}`);
-            return { ...x, tickedToday: ticked, streak: ticked ? x.streak + 1 : Math.max(0, x.streak - 1), history: [...(x.history || [0,0,0,0,0,0,0]).slice(1), ticked ? 1 : 0] };
+        case "edit_habit": {
+          hs = hs.map((h) => (matches(h, a, "name") ? { ...h, ...(a.updates || {}) } : h));
+          toast("Updated habit");
+          break;
+        }
+        case "tick_habit": {
+          const val = a.value === undefined ? true : a.value;
+          hs = hs.map((h) => {
+            if (!matches(h, a, "name")) return h;
+            if (val && h.tickedToday) return h;
+            if (val) logHistory("habit", "Habit done: " + h.name);
+            const cont = h.lastTicked && daysBetween(h.lastTicked, todayK) === 1;
+            return {
+              ...h,
+              tickedToday: val,
+              lastTicked: val ? todayK : null,
+              streak: val ? (cont ? (h.streak || 0) + 1 : 1) : Math.max(0, (h.streak || 0) - 1),
+              week: [...(h.week || [0, 0, 0, 0, 0, 0, 0]).slice(0, 6), val ? 1 : 0],
+            };
           });
-          addToast("Habit updated");
-          break;
-        case "delete_habit":
-          hs = hs.filter((x) => x.id !== action.id && !x.name.toLowerCase().includes((action.name || "").toLowerCase()));
-          addToast("Deleted habit");
-          break;
-        case "add_idea": {
-          const ni = { id: Date.now().toString() + Math.random(), t: action.text };
-          is = [...is, ni];
-          addToast("Added idea");
+          toast("Habit updated");
           break;
         }
-        case "delete_idea":
-          is = is.filter((x) => x.id !== action.id && !x.t.toLowerCase().includes((action.text || "").toLowerCase()));
-          addToast("Deleted idea");
+        case "delete_habit": {
+          const before = hs.length;
+          hs = hs.filter((h) => !matches(h, a, "name"));
+          if (hs.length < before) toast("Deleted habit");
           break;
+        }
+        case "add_idea": {
+          if (!a.text || is.some((i) => norm(i.t) === norm(a.text))) break;
+          is = [...is, { id: uid(), t: a.text }];
+          toast("Added idea");
+          break;
+        }
+        case "delete_idea": {
+          const before = is.length;
+          is = is.filter((i) => !matches(i, a, "t"));
+          if (is.length < before) toast("Deleted idea");
+          break;
+        }
         case "add_context": {
-          const today = new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" });
-          setContext((prev) => [{ date: today, text: action.text }, ...prev.slice(0, 9)]);
-          addToast("Context noted");
+          if (a.text) noteContext(a.text);
+          break;
+        }
+        case "clear_completed_tasks": {
+          ts = ts.filter((t) => !t.done);
+          toast("Cleared completed tasks");
           break;
         }
         case "generate_plan":
-          needsPlan = true;
+          wantPlan = true;
           break;
         case "generate_tomorrow_plan":
-          needsTomorrowPlan = true;
+          wantTomorrow = true;
           break;
-        case "clear_completed_tasks":
-          ts = ts.filter((x) => !x.done);
-          addToast("Cleared completed tasks");
+        default:
           break;
-        default: break;
       }
     }
-    return { gs, ts, hs, is, needsPlan, needsTomorrowPlan };
-  };
+    return { gs, ts, hs, is, wantPlan, wantTomorrow };
+  }
 
-  const generateTodayPlan = async (g, t, h, i, sp) => {
+  async function generateToday(snap) {
+    const src = snap || { gs: goals, ts: tasks, hs: habits, is: ideas };
     setPlanLoading(true);
-    const ctx = buildContext(g || goals, t || tasks, h || habits, i || ideas, sp || skipPatterns, timestamps, context);
+    const ctx = buildContext({
+      goals: src.gs,
+      tasks: src.ts,
+      habits: src.hs,
+      ideas: src.is,
+      skipPatterns,
+      timestamps,
+      context,
+    });
+    const keep = todayPlan.filter((b) => b.done || b.status === "skipped");
+    const keepNote = keep.length
+      ? `\n\nALREADY DONE OR SKIPPED TODAY (never repeat these):\n${keep
+          .map((b) => `- ${b.title} (${b.done ? "done" : "skipped"})`)
+          .join("\n")}\n\nPlan only the remaining part of the day.`
+      : "";
     try {
-      const text = await callClaude(
-        `You are a personal day planner for Locus. ${ctx}
-
-Generate a realistic flexible day plan. Rules:
-- NO rigid times unless the user specified something at a specific time (like "meeting at 3pm")
-- Instead use approximate durations: (~1 hr), (~90 min), (~30 min)
-- Order blocks by when they should happen (morning/afternoon/evening)
-- Front burner goals get the most time
-- Habits are constraints — factor them in but don't list them as blocks unless they need dedicated time
-- Include 1-2 flex blocks for buffer
-- Use completion time data to estimate realistic durations
-- Avoid blocks matching skip patterns — restructure timing
-- Respond ONLY with a JSON array, no markdown. Format: [{"time":"Morning","title":"Block title","desc":"Description. Be specific and actionable.","imp":3,"duration":"~90 min"}]
-- imp is 1-3. duration is a string like "~1 hr" or "~45 min"`,
-        [{ role: "user", content: "Build my plan for today." }]
-      );
-      const clean = text.replace(/```json|```/g, "").trim();
-      const blocks = JSON.parse(clean).map((b, idx) => ({ ...b, id: "b" + idx + Date.now(), done: false, status: "pending", startTime: null }));
-      setTodayPlan(blocks);
-      addToast("Today's plan generated");
-    } catch (e) {
-      addToast("Error generating plan");
+      const text = await callClaude(`You build one day's plan for Locus.\n\n${ctx}${keepNote}\n\n${PLAN_RULES}`, [
+        { role: "user", content: "Build my plan for today." },
+      ]);
+      const blocks = extractJSONArray(text).map((b) => ({
+        time: b.time || "Anytime",
+        title: b.title || "Untitled",
+        desc: b.desc || "",
+        imp: Math.min(3, Math.max(1, Number(b.imp) || 2)),
+        duration: b.duration || "",
+        id: uid(),
+        done: false,
+        status: "pending",
+        startTime: null,
+      }));
+      setTodayPlan([...keep, ...blocks]);
+      toast("Plan generated");
+    } catch {
+      toast("Couldn't generate plan");
     }
     setPlanLoading(false);
-  };
+  }
 
-  const generateTomorrowPlanFromChat = async (extraInstructions, g, t, h) => {
+  async function generateTomorrow(extra, snap) {
+    const src = snap || { gs: goals, ts: tasks, hs: habits, is: ideas };
     setPlanLoading(true);
-    const ctx = buildContext(g || goals, t || tasks, h || habits, ideas, skipPatterns, timestamps, context);
-    const selected = selectedSuggestions.join(", ");
+    const ctx = buildContext({
+      goals: src.gs,
+      tasks: src.ts,
+      habits: src.hs,
+      ideas: src.is,
+      skipPatterns,
+      timestamps,
+      context,
+    });
     try {
       const text = await callClaude(
-        `You are planning tomorrow for the user. ${ctx}
-
-Selected suggestions for tomorrow: ${selected || "none specified"}
-Additional instructions: ${extraInstructions || "none"}
-
-Generate a realistic flexible plan for tomorrow. Rules:
-- NO rigid times unless specified
-- Use approximate durations: (~1 hr), (~90 min), (~30 min)
-- Order by when things should happen
-- Factor in selected suggestions and additional instructions
-- Habits auto-apply, don't list unless needing dedicated time
-- Include 1-2 flex blocks
-- Be specific and actionable in descriptions
-- Respond ONLY with JSON array. Format: [{"time":"Morning","title":"Block title","desc":"Description","imp":3,"duration":"~90 min"}]`,
+        `You build tomorrow's plan for Locus.\n\n${ctx}\n\nSUGGESTIONS THE USER PICKED FOR TOMORROW:\n${
+          selectedSuggestions.join("\n") || "none"
+        }\n\nEVERYTHING ELSE THE USER SAID:\n${extra || "nothing"}\n\n${PLAN_RULES}`,
         [{ role: "user", content: "Build my plan for tomorrow." }]
       );
-      const clean = text.replace(/```json|```/g, "").trim();
-      const blocks = JSON.parse(clean).map((b, idx) => ({ ...b, id: "t" + idx + Date.now(), done: false, status: "pending", startTime: null }));
+      const blocks = extractJSONArray(text).map((b) => ({
+        time: b.time || "Anytime",
+        title: b.title || "Untitled",
+        desc: b.desc || "",
+        imp: Math.min(3, Math.max(1, Number(b.imp) || 2)),
+        duration: b.duration || "",
+        id: uid(),
+        done: false,
+        status: "pending",
+        startTime: null,
+      }));
       setTomorrowPlan(blocks);
-      const tmrw = new Date();
-      tmrw.setDate(tmrw.getDate() + 1);
-      localStorage.setItem("locus-tomorrow-date", dateKey(tmrw));
-      addToast("Tomorrow's plan generated");
-    } catch (e) {
-      addToast("Error generating tomorrow's plan");
+      save(KEYS.tomorrowDate, tomorrowK);
+      toast("Tomorrow's plan ready");
+    } catch {
+      toast("Couldn't generate tomorrow's plan");
     }
     setPlanLoading(false);
-  };
+  }
 
-  const loadTomorrowSuggestions = async () => {
-    setSuggestionsLoading(true);
-    const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns, timestamps, context);
+  async function loadSuggestions() {
+    setSugLoading(true);
+    const ctx = buildContext({ goals, tasks, habits, ideas, skipPatterns, timestamps, context });
     try {
       const text = await callClaude(
-        `You are suggesting what to do tomorrow for the user. ${ctx}
-
-Generate 6-8 suggestions for tomorrow. Mix of:
-- Goal-related blocks (front burner first)
-- Pending tasks that need attention
-- Social/recovery if neglected
-- Anything time-sensitive
-
-Each suggestion should be a short actionable card. Respond ONLY with JSON array:
-[{"title":"...","desc":"...","type":"goal|task|habit|social|recovery|other","imp":1|2|3}]`,
+        `You suggest what the user could do tomorrow.\n\n${ctx}\n\nGive 6 to 8 short suggestion cards. Mix front burner goal work, pending tasks that matter, anything time sensitive, and recovery or social if neglected. Never suggest a habit that is not in the HABITS list. Respond with ONLY a JSON array, no prose:\n[{"title":"...","desc":"...","type":"goal|task|social|recovery|other","imp":1}]`,
         [{ role: "user", content: "What should I do tomorrow?" }]
       );
-      const clean = text.replace(/```json|```/g, "").trim();
-      const sugs = JSON.parse(clean);
-      setTomorrowSuggestions(sugs);
-    } catch (e) {
-      addToast("Error loading suggestions");
+      setTomorrowSuggestions(extractJSONArray(text));
+    } catch {
+      toast("Couldn't load suggestions");
     }
-    setSuggestionsLoading(false);
-  };
+    setSugLoading(false);
+  }
 
-  const toggleBlock = (id) => {
-    const block = todayPlan.find((b) => b.id === id);
-    if (!block) return;
-    if (!block.done) {
-      logTimestamp(block.title, block.startTime);
-      addHistory("task", `Completed: ${block.title}`);
+  function toggleBlock(id) {
+    const b = todayPlan.find((x) => x.id === id);
+    if (!b || b.status === "skipped") return;
+    if (!b.done) {
+      recordDuration(b.title, b.startTime);
+      logHistory("task", "Completed: " + b.title);
+      if (navigator.vibrate) navigator.vibrate([12, 8, 20]);
     }
-    setTodayPlan((prev) => prev.map((b) => b.id === id ? { ...b, done: !b.done, startTime: b.done ? Date.now() : b.startTime } : b));
-    if (navigator.vibrate) navigator.vibrate([12, 8, 20]);
-  };
+    setTodayPlan((prev) => prev.map((x) => (x.id === id ? { ...x, done: !x.done } : x)));
+  }
 
-  const startBlock = (id) => {
-    setTodayPlan((prev) => prev.map((b) => b.id === id ? { ...b, startTime: b.startTime || Date.now() } : b));
-  };
+  function startBlock(id) {
+    setTodayPlan((prev) => prev.map((x) => (x.id === id && !x.startTime ? { ...x, startTime: Date.now() } : x)));
+  }
 
-  const skipBlock = (id, reason) => {
-    setTodayPlan((prev) => prev.map((b) => {
-      if (b.id !== id) return b;
-      setSkipPatterns((sp) => ({ ...sp, [b.title]: (sp[b.title] || 0) + 1 }));
-      addHistory("skip", `Skipped: ${b.title}${reason ? " — " + reason : ""}`);
-      if (reason) {
-        setContext((prev2) => [{ date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), text: `Skipped ${b.title}: ${reason}` }, ...prev2.slice(0, 9)]);
-      }
-      return { ...b, status: "skipped", skipReason: reason };
-    }));
-  };
+  function skipBlock(id, reason) {
+    const b = todayPlan.find((x) => x.id === id);
+    if (!b) return;
+    bumpSkip(b.title);
+    logHistory("skip", "Skipped: " + b.title + (reason ? " - " + reason : ""));
+    if (reason) noteContext(`Skipped ${b.title}: ${reason}`);
+    setTodayPlan((prev) => prev.map((x) => (x.id === id ? { ...x, status: "skipped", skipReason: reason } : x)));
+  }
 
-  const confirmReschedule = () => {
-    setTodayPlan((prev) => prev.map((b) => {
-      if (b.id !== rescheduleModal) return b;
-      setSkipPatterns((sp) => ({ ...sp, [b.title]: (sp[b.title] || 0) + 1 }));
-      addHistory("reschedule", `Rescheduled: ${b.title}${rescheduleTime ? " → " + rescheduleTime : ""}${rescheduleReason ? " (" + rescheduleReason + ")" : ""}`);
-      if (rescheduleReason) {
-        setContext((prev2) => [{ date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), text: `Rescheduled ${b.title}: ${rescheduleReason}` }, ...prev2.slice(0, 9)]);
-      }
-      return { ...b, status: "rescheduled", newTime: rescheduleTime, conflict: rescheduleReason };
-    }));
-    setRescheduleModal(null);
+  function confirmReschedule() {
+    const b = todayPlan.find((x) => x.id === rescheduleId);
+    if (b) {
+      bumpSkip(b.title);
+      logHistory(
+        "reschedule",
+        "Moved: " +
+          b.title +
+          (rescheduleTime ? " to " + rescheduleTime : "") +
+          (rescheduleReason ? " - " + rescheduleReason : "")
+      );
+      if (rescheduleReason) noteContext(`Moved ${b.title}: ${rescheduleReason}`);
+      setTodayPlan((prev) =>
+        prev.map((x) =>
+          x.id === rescheduleId ? { ...x, status: "rescheduled", newTime: rescheduleTime, conflict: rescheduleReason } : x
+        )
+      );
+    }
+    setRescheduleId(null);
     setRescheduleReason("");
     setRescheduleTime("");
-  };
+  }
 
-  const sendChat = async () => {
-    if (!chatInput.trim() || chatLoading) return;
-    const userMsg = chatInput.trim();
+  async function sendChat() {
+    const msg = chatInput.trim();
+    if (!msg || chatLoading) return;
     setChatInput("");
-    setChatHistory((prev) => [...prev, { role: "user", content: userMsg }]);
+    const nextHistory = [...chatHistory, { role: "user", content: msg }];
+    setChatHistory(nextHistory);
     setChatLoading(true);
-    const ctx = buildContext(goals, tasks, habits, ideas, skipPatterns, timestamps, context);
-    const needsSearch = /search|find|look up|what's happening|events|news|current|latest|near me|festival|concert|restaurant/i.test(userMsg);
-    const planState = JSON.stringify(todayPlan.map(b => ({ title: b.title, status: b.done ? "done" : b.status, duration: b.duration })));
 
-    try {
-      const reply = await callClaude(
-        `You are Locus, a personal life planner assistant. You have full ability to modify the user's data directly and search the web when relevant.
+    const ctx = buildContext({ goals, tasks, habits, ideas, skipPatterns, timestamps, context });
+    const wantsSearch =
+      /\b(search|look up|find me|google|near me|events?|festival|concert|news|latest|current|who is|what's happening)\b/i.test(
+        msg
+      );
+    const planState = todayPlan.length
+      ? todayPlan.map((b) => `${b.title} [${b.done ? "done" : b.status}]`).join("; ")
+      : "no plan generated yet";
+
+    const system = `You are Locus, the user's personal life planner. You can change their data directly.
 
 ${ctx}
 
-CURRENT TODAY PLAN STATE:
-${planState}
+TODAY'S PLAN RIGHT NOW: ${planState}
 
-You can perform MULTIPLE actions in one response. After your message, include a JSON array of actions on the very last line.
+Reply in plain conversational text. If you need to change data, put a JSON array of actions on the FINAL line by itself with nothing after it.
 
-AVAILABLE ACTIONS:
-{"type":"add_goal","name":"...","area":"Fitness|Career|Learning|Social|Finance|Health|Creative|Other","desc":"...","deadline":"...","priority":"front|maint|back"}
-{"type":"edit_goal","id":"...","updates":{"name":"...","p":"...","desc":"...","deadline":"..."}}
-{"type":"delete_goal","id":"..."}
-{"type":"set_goal_priority","name":"...","priority":"front|maint|back"}
-{"type":"promote_idea","id":"...","area":"...","priority":"front|maint|back"}
-{"type":"add_task","name":"...","due":"...","goal":"...","importance":1|2|3}
-{"type":"complete_task","name":"..."}
-{"type":"uncomplete_task","name":"..."}
-{"type":"delete_task","name":"..."}
-{"type":"add_habit","name":"...","freq":"any frequency as text","note":"..."}
-{"type":"tick_habit","name":"...","value":true|false}
-{"type":"delete_habit","name":"..."}
-{"type":"add_idea","text":"..."}
-{"type":"delete_idea","text":"..."}
-{"type":"add_context","text":"..."}
+ACTIONS:
+{"type":"add_goal","name","area","desc","deadline","priority":"front|maint|back"}
+{"type":"edit_goal","name","updates":{}}
+{"type":"delete_goal","name"}
+{"type":"set_goal_priority","name","priority"}
+{"type":"promote_idea","text","area","priority"}
+{"type":"add_task","name","due","goal","importance":1|2|3}
+{"type":"edit_task","name","updates":{}}
+{"type":"complete_task","name"}
+{"type":"uncomplete_task","name"}
+{"type":"delete_task","name"}
+{"type":"add_habit","name","freq","note"}
+{"type":"edit_habit","name","updates":{}}
+{"type":"tick_habit","name","value":true|false}
+{"type":"delete_habit","name"}
+{"type":"add_idea","text"}
+{"type":"delete_idea","text"}
+{"type":"add_context","text"}
+{"type":"clear_completed_tasks"}
 {"type":"generate_plan"}
 {"type":"generate_tomorrow_plan"}
-{"type":"clear_completed_tasks"}
 
-CRITICAL ADAPTIVE REPLANNING RULE: If the user tells you ANYTHING about their day changing — finished something early, ran short on time, something came up, wants to move things around, only did part of something, feels tired, plans changed — you MUST include {"type":"generate_plan"} in your actions. Never just acknowledge it conversationally without updating the plan. The plan must always reflect reality.
+HARD RULES:
+1. If the user says anything that changes how their day will actually go - ran out of time, did half of something, something came up, feels drained, wants to shuffle things, finished early - you MUST include {"type":"generate_plan"}. Acknowledging without regenerating is a failure.
+2. Never add a goal, task, habit, or idea that already exists in the lists above. Check first.
+3. Only reference habits that exist in the HABITS list. Never invent one.
+4. Never emit an action with an empty name or text field.
+5. When the user shares stress, mood, or life circumstances, capture it with add_context so future plans account for it.
+6. Be direct and specific. Reference their real goals by name. Confirm exactly what you changed.
 
-FORMAT: Write your response, then on the very last line put the actions array if needed.
 Example:
-Done! Added the goal and noted your context.
-[{"type":"add_goal","name":"Learn guitar","area":"Learning","priority":"back"},{"type":"add_context","text":"User wants to learn guitar"}]
+Split the workout - second half is on tonight's plan now.
+[{"type":"add_context","text":"Only got through half the workout this morning, doing the rest tonight"},{"type":"generate_plan"}]`;
 
-If someone brain dumps stress or life context, use add_context to remember it and factor it into future plans.
-Be conversational and direct. Reference their actual data. Always confirm what you did.`,
-        [...chatHistory, { role: "user", content: userMsg }],
-        needsSearch
-      );
-
-      let message = reply;
+    try {
+      const reply = await callClaude(system, nextHistory, wantsSearch);
+      let message = reply.trim();
       let actions = [];
-
-      const lines = reply.trim().split("\n");
-      const lastLine = lines[lines.length - 1].trim();
-      if (lastLine.startsWith("[")) {
+      const lines = message.split("\n");
+      const last = lines[lines.length - 1].trim();
+      if (last.startsWith("[")) {
         try {
-          actions = JSON.parse(lastLine);
-          message = lines.slice(0, -1).join("\n").trim();
-        } catch (e) {}
+          const parsed = JSON.parse(last);
+          if (Array.isArray(parsed)) {
+            actions = parsed;
+            message = lines.slice(0, -1).join("\n").trim();
+          }
+        } catch {}
       }
 
-      if (actions.length > 0) {
-        const { gs, ts, hs, is, needsPlan, needsTomorrowPlan } = applyActions(actions, goals, tasks, habits, ideas);
-        setGoals(gs);
-        setTasks(ts);
-        setHabits(hs);
-        setIdeas(is);
-        if (needsPlan) await generateTodayPlan(gs, ts, hs, is, skipPatterns);
-        if (needsTomorrowPlan) await generateTomorrowPlanFromChat("", gs, ts, hs);
-      }
+      setChatHistory((prev) => [...prev, { role: "assistant", content: message || "Done." }]);
 
-      setChatHistory((prev) => [...prev, { role: "assistant", content: message }]);
+      if (actions.length) {
+        const res = applyActions(actions, { gs: goals, ts: tasks, hs: habits, is: ideas });
+        setGoals(res.gs);
+        setTasks(res.ts);
+        setHabits(res.hs);
+        setIdeas(res.is);
+        if (res.wantPlan) await generateToday(res);
+        if (res.wantTomorrow) await generateTomorrow("", res);
+      }
     } catch {
-      setChatHistory((prev) => [...prev, { role: "assistant", content: "Error connecting. Try again." }]);
+      setChatHistory((prev) => [...prev, { role: "assistant", content: "Couldn't reach the server. Try again." }]);
     }
     setChatLoading(false);
-  };
+  }
 
-  const sendTomorrowChat = async () => {
-    if (!tomorrowChatInput.trim() || tomorrowChatLoading) return;
-    const userMsg = tomorrowChatInput.trim();
-    setTomorrowChatInput("");
-    setTomorrowChatHistory((prev) => [...prev, { role: "user", content: userMsg }]);
-    setTomorrowChatLoading(true);
-
-    const wantsGenerate = /generate|build|make|create|plan|schedule/i.test(userMsg);
-
-    if (wantsGenerate || tomorrowChatHistory.length > 2) {
-      await generateTomorrowPlanFromChat(
-        [...tomorrowChatHistory.map(m => m.content), userMsg].join(". "),
-        goals, tasks, habits
-      );
-      setTomorrowChatHistory((prev) => [...prev, { role: "assistant", content: "Generated your plan for tomorrow. Check it above — it'll automatically become your Today plan in the morning." }]);
+  async function sendTomorrowChat() {
+    const msg = tmrInput.trim();
+    if (!msg || tmrLoading) return;
+    setTmrInput("");
+    const next = [...tmrChat, { role: "user", content: msg }];
+    setTmrChat(next);
+    setTmrLoading(true);
+    const wantsGenerate = /\b(generate|build|make|create|do it|go ahead|ready|that's it)\b/i.test(msg);
+    if (wantsGenerate) {
+      await generateTomorrow(next.map((m) => m.content).join(". "), null);
+      setTmrChat([
+        ...next,
+        { role: "assistant", content: "Built it. It becomes your Today plan automatically in the morning." },
+      ]);
     } else {
-      setTomorrowChatHistory((prev) => [...prev, { role: "assistant", content: "Got it. Tell me anything else you want to include tomorrow, or say 'generate my plan' when ready." }]);
+      setTmrChat([...next, { role: "assistant", content: 'Got it. Anything else? Say "generate" when ready.' }]);
     }
-    setTomorrowChatLoading(false);
-  };
+    setTmrLoading(false);
+  }
 
-  const today = new Date();
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const todayStr = today.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
-  const tomorrowStr = tomorrow.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+  function tickHabit(id) {
+    if (navigator.vibrate) navigator.vibrate([15, 10, 25]);
+    const h0 = habits.find((h) => h.id === id);
+    if (h0 && !h0.tickedToday) logHistory("habit", "Habit done: " + h0.name);
+    setHabits((prev) =>
+      prev.map((h) => {
+        if (h.id !== id) return h;
+        const val = !h.tickedToday;
+        const cont = h.lastTicked && daysBetween(h.lastTicked, todayK) === 1;
+        return {
+          ...h,
+          tickedToday: val,
+          lastTicked: val ? todayK : null,
+          streak: val ? (cont ? (h.streak || 0) + 1 : 1) : Math.max(0, (h.streak || 0) - 1),
+          week: [...(h.week || [0, 0, 0, 0, 0, 0, 0]).slice(0, 6), val ? 1 : 0],
+        };
+      })
+    );
+  }
 
-  const doneTodayBlocks = todayPlan.filter((b) => b.done || b.status === "skipped");
-  const pendingTodayBlocks = todayPlan.filter((b) => !b.done && b.status !== "skipped");
-  const progress = todayPlan.length ? Math.round((todayPlan.filter((b) => b.done).length / todayPlan.length) * 100) : 0;
+  const doneBlocks = todayPlan.filter((b) => b.done || b.status === "skipped");
+  const openBlocks = todayPlan.filter((b) => !b.done && b.status !== "skipped");
+  const completedCount = todayPlan.filter((b) => b.done).length;
+  const progress = todayPlan.length ? Math.round((completedCount / todayPlan.length) * 100) : 0;
 
-  const SUG_COLORS = { goal: "#8eaefb", task: "#f28b82", habit: "#edbe80", social: "#b8a0fc", recovery: "#81c995", other: "#706d68" };
+  const SUG_COLORS = { goal: "#8eaefb", task: "#f28b82", social: "#b8a0fc", recovery: "#81c995", other: "#706d68" };
 
   const navSections = [
-    { title: "Plan", items: [
-      { id: "today", label: "Today" },
-      { id: "tomorrow", label: "Tomorrow" },
-      { id: "calendar", label: "Calendar" },
-    ]},
-    { title: "Chat", items: [
-      { id: "chat", label: "Chat" },
-    ]},
-    { title: "Organize", items: [
-      { id: "goals", label: "Goals", badge: goals.length },
-      { id: "tasks", label: "Tasks", badge: tasks.filter((t) => !t.done).length },
-      { id: "habits", label: "Habits", badge: habits.length },
-      { id: "ideas", label: "Ideas", badge: ideas.length },
-    ]},
-    { title: "Review", items: [
-      { id: "history", label: "History" },
-    ]},
+    {
+      title: "Plan",
+      items: [
+        { id: "today", label: "Today" },
+        { id: "tomorrow", label: "Tomorrow" },
+        { id: "calendar", label: "Calendar" },
+      ],
+    },
+    { title: "Chat", items: [{ id: "chat", label: "Chat" }] },
+    {
+      title: "Organize",
+      items: [
+        { id: "goals", label: "Goals", badge: goals.length },
+        { id: "tasks", label: "Tasks", badge: tasks.filter((t) => !t.done).length },
+        { id: "habits", label: "Habits", badge: habits.length },
+        { id: "ideas", label: "Ideas", badge: ideas.length },
+      ],
+    },
+    { title: "Review", items: [{ id: "history", label: "History" }] },
   ];
+  const allNav = navSections.flatMap((s) => s.items);
 
-  const allNavItems = navSections.flatMap((sec) => sec.items);
+  const calY = calMonth.getFullYear();
+  const calM = calMonth.getMonth();
+  const firstDow = new Date(calY, calM, 1).getDay();
+  const daysInMonth = new Date(calY, calM + 1, 0).getDate();
 
-  // Calendar helpers
-  const calYear = calMonth.getFullYear();
-  const calMonthIdx = calMonth.getMonth();
-  const firstDayOfWeek = new Date(calYear, calMonthIdx, 1).getDay();
-  const daysInMonth = new Date(calYear, calMonthIdx + 1, 0).getDate();
-  const todayKey = dateKey(today);
-  const tomorrowKey = dateKey(tomorrow);
+  const selectedDateObj = new Date(calSelected + "T12:00:00");
+  const selectedPlan =
+    calSelected === todayK
+      ? todayPlan
+      : calSelected === tomorrowK && tomorrowPlan.length
+      ? tomorrowPlan
+      : planArchive[calSelected] || [];
+  const selectedHistory = history.find((h) => h.key === calSelected || h.date === prettyDate(selectedDateObj));
 
-  const dayHasData = (key) => {
-    if (planArchive[key]?.length) return true;
-    if (key === tomorrowKey && tomorrowPlan.length) return true;
-    const d = new Date(key + "T12:00:00");
-    return history.some((h) => h.date === histDateFormat(d));
+  const dayHasData = (k) => {
+    if (k === todayK && todayPlan.length) return true;
+    if (k === tomorrowK && tomorrowPlan.length) return true;
+    if (planArchive[k] && planArchive[k].length) return true;
+    return history.some((h) => h.key === k);
   };
 
-  const selectedDate = new Date(calSelected + "T12:00:00");
-  const selectedPlan = calSelected === tomorrowKey && tomorrowPlan.length ? tomorrowPlan : (planArchive[calSelected] || []);
-  const selectedHistory = history.find((h) => h.date === histDateFormat(selectedDate));
-
-  const s = (obj) => obj;
+  const card = { background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 12 };
+  const mono = { fontFamily: "monospace" };
+  const primaryBtn = {
+    background: "#8eaefb",
+    color: "#0e0f1a",
+    border: "none",
+    borderRadius: 7,
+    padding: "8px 14px",
+    fontSize: 12,
+    fontWeight: 500,
+    cursor: "pointer",
+  };
+  const inputStyle = {
+    flex: 1,
+    background: "#22222a",
+    border: "1px solid rgba(255,255,255,0.09)",
+    borderRadius: 7,
+    padding: "10px 14px",
+    fontSize: 16,
+    color: "#f2efe9",
+    outline: "none",
+  };
+  const sectionLabel = {
+    fontSize: 10,
+    ...mono,
+    color: "#706d68",
+    textTransform: "uppercase",
+    letterSpacing: "0.1em",
+  };
 
   return (
-    <div style={s({ display: "flex", height: "100vh", overflow: "hidden", background: "#1a1a20", color: "#f2efe9", fontFamily: "'Geist','Inter',sans-serif", fontSize: 14 })}>
-
-      <div style={s({ position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 400, display: "flex", flexDirection: "column", gap: 6, alignItems: "center", pointerEvents: "none" })}>
+    <div
+      style={{
+        display: "flex",
+        height: "100vh",
+        overflow: "hidden",
+        background: "#1a1a20",
+        color: "#f2efe9",
+        fontFamily: "'Geist','Inter',sans-serif",
+        fontSize: 14,
+      }}
+    >
+      <div
+        style={{
+          position: "fixed",
+          bottom: 24,
+          left: "50%",
+          transform: "translateX(-50%)",
+          zIndex: 400,
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+          alignItems: "center",
+          pointerEvents: "none",
+        }}
+      >
         {toasts.map((t) => (
-          <div key={t.id} style={s({ background: "#2a2a34", border: "1px solid rgba(142,174,251,0.3)", borderRadius: 8, padding: "8px 16px", fontSize: 12, color: "#8eaefb", fontFamily: "monospace", whiteSpace: "nowrap" })}>{t.msg}</div>
+          <div
+            key={t.id}
+            style={{
+              background: "#2a2a34",
+              border: "1px solid rgba(142,174,251,0.3)",
+              borderRadius: 8,
+              padding: "8px 16px",
+              fontSize: 12,
+              color: "#8eaefb",
+              ...mono,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {t.msg}
+          </div>
         ))}
       </div>
 
-      {sidebarOpen && <div onClick={() => setSidebarOpen(false)} style={s({ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50 })} />}
+      {sidebarOpen && (
+        <div
+          onClick={() => setSidebarOpen(false)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50 }}
+        />
+      )}
 
-      {/* SIDEBAR — Option A grouped sections */}
-      <div style={s({ position: "fixed", top: 0, left: 0, height: "100%", width: 220, background: "#22222a", borderRight: "1px solid rgba(255,255,255,0.09)", display: "flex", flexDirection: "column", zIndex: 60, transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)", transition: "transform 0.22s ease" })}>
-        <div style={s({ padding: "24px 20px 14px", display: "flex", alignItems: "flex-start", justifyContent: "space-between" })}>
+      <div
+        style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          height: "100%",
+          width: 220,
+          background: "#22222a",
+          borderRight: "1px solid rgba(255,255,255,0.09)",
+          display: "flex",
+          flexDirection: "column",
+          zIndex: 60,
+          transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)",
+          transition: "transform 0.22s ease",
+        }}
+      >
+        <div style={{ padding: "24px 20px 14px", display: "flex", justifyContent: "space-between" }}>
           <div>
-            <div style={s({ fontFamily: "Georgia,serif", fontSize: 21, fontStyle: "italic", color: "#f2efe9" })}>Locus</div>
-            <div style={s({ fontSize: 11, color: "#706d68", marginTop: 3 })}>where focus lives</div>
+            <div style={{ fontFamily: "Georgia,serif", fontSize: 21, fontStyle: "italic" }}>Locus</div>
+            <div style={{ fontSize: 11, color: "#706d68", marginTop: 3 }}>where focus lives</div>
           </div>
-          <button onClick={() => setSidebarOpen(false)} style={s({ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 18, lineHeight: 1, marginTop: 2 })}>x</button>
+          <button
+            onClick={() => setSidebarOpen(false)}
+            style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 18 }}
+          >
+            &times;
+          </button>
         </div>
-        <nav style={s({ padding: "0 10px", flex: 1, overflowY: "auto" })}>
+        <nav style={{ padding: "0 10px", flex: 1, overflowY: "auto" }}>
           {navSections.map((sec) => (
             <div key={sec.title}>
-              <div style={s({ fontSize: 9, fontFamily: "monospace", color: "#4a4a55", textTransform: "uppercase", letterSpacing: "0.14em", padding: "12px 10px 4px" })}>{sec.title}</div>
+              <div
+                style={{
+                  fontSize: 9,
+                  ...mono,
+                  color: "#4a4a55",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.14em",
+                  padding: "12px 10px 4px",
+                }}
+              >
+                {sec.title}
+              </div>
               {sec.items.map((item) => (
-                <button key={item.id} onClick={() => { setTab(item.id); setSidebarOpen(false); }} style={s({ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 7, cursor: "pointer", color: tab === item.id ? "#8eaefb" : "#b0aca6", background: tab === item.id ? "rgba(142,174,251,0.16)" : "none", border: "none", width: "100%", textAlign: "left", fontSize: 13, marginBottom: 1, fontWeight: tab === item.id ? 500 : 400 })}>
+                <button
+                  key={item.id}
+                  onClick={() => {
+                    setTab(item.id);
+                    setSidebarOpen(false);
+                  }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "8px 10px",
+                    borderRadius: 7,
+                    cursor: "pointer",
+                    color: tab === item.id ? "#8eaefb" : "#b0aca6",
+                    background: tab === item.id ? "rgba(142,174,251,0.16)" : "none",
+                    border: "none",
+                    width: "100%",
+                    textAlign: "left",
+                    fontSize: 13,
+                    marginBottom: 1,
+                    fontWeight: tab === item.id ? 500 : 400,
+                  }}
+                >
                   {item.label}
-                  {item.badge !== undefined && <span style={s({ marginLeft: "auto", fontSize: 10, background: tab === item.id ? "rgba(142,174,251,0.28)" : "#32323e", color: tab === item.id ? "#8eaefb" : "#706d68", padding: "1px 6px", borderRadius: 99 })}>{item.badge}</span>}
+                  {item.badge !== undefined && (
+                    <span
+                      style={{
+                        marginLeft: "auto",
+                        fontSize: 10,
+                        background: tab === item.id ? "rgba(142,174,251,0.28)" : "#32323e",
+                        color: tab === item.id ? "#8eaefb" : "#706d68",
+                        padding: "1px 6px",
+                        borderRadius: 99,
+                      }}
+                    >
+                      {item.badge}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
           ))}
         </nav>
-        <div style={s({ padding: "14px 20px", borderTop: "1px solid rgba(255,255,255,0.09)", fontSize: 11, color: "#706d68", fontFamily: "monospace" })}>
-          <div>{today.toLocaleDateString("en-US", { weekday: "long" })}</div>
-          <div style={s({ marginTop: 2, color: "#b0aca6" })}>{today.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}</div>
+        <div
+          style={{
+            padding: "14px 20px",
+            borderTop: "1px solid rgba(255,255,255,0.09)",
+            fontSize: 11,
+            color: "#706d68",
+            ...mono,
+          }}
+        >
+          <div>{now.toLocaleDateString("en-US", { weekday: "long" })}</div>
+          <div style={{ marginTop: 2, color: "#b0aca6" }}>
+            {now.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
+          </div>
         </div>
       </div>
 
-      {/* MAIN */}
-      <div style={s({ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column", position: "relative" })}>
-
-        <div style={s({ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
-          <button onClick={() => setSidebarOpen(true)} style={s({ background: "none", border: "none", cursor: "pointer", color: "#b0aca6", fontSize: 20, lineHeight: 1, flexShrink: 0 })}>&#9776;</button>
-          <div style={s({ fontFamily: "Georgia,serif", fontSize: 16, fontStyle: "italic", color: "#f2efe9" })}>
-            {allNavItems.find(n => n.id === tab)?.label}
+      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            padding: "12px 16px",
+            borderBottom: "1px solid rgba(255,255,255,0.09)",
+            flexShrink: 0,
+          }}
+        >
+          <button
+            onClick={() => setSidebarOpen(true)}
+            style={{ background: "none", border: "none", cursor: "pointer", color: "#b0aca6", fontSize: 20 }}
+          >
+            &#9776;
+          </button>
+          <div style={{ fontFamily: "Georgia,serif", fontSize: 16, fontStyle: "italic" }}>
+            {allNav.find((n) => n.id === tab)?.label}
           </div>
         </div>
 
-        {/* TODAY */}
         {tab === "today" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ padding: "16px 20px 14px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
-              <div style={s({ display: "flex", alignItems: "flex-start", justifyContent: "space-between" })}>
+          <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
+            <div style={{ padding: "16px 20px 14px", borderBottom: "1px solid rgba(255,255,255,0.09)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                 <div>
-                  <div style={s({ fontFamily: "Georgia,serif", fontSize: 22, fontStyle: "italic" })}>{today.toLocaleDateString("en-US", { weekday: "long" })}</div>
-                  <div style={s({ fontSize: 11, color: "#706d68", marginTop: 3, fontFamily: "monospace" })}>{todayStr}</div>
+                  <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontStyle: "italic" }}>
+                    {now.toLocaleDateString("en-US", { weekday: "long" })}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#706d68", marginTop: 3, ...mono }}>
+                    {now.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
+                  </div>
                 </div>
-                <button onClick={() => generateTodayPlan()} disabled={planLoading} style={s({ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer", opacity: planLoading ? 0.6 : 1, flexShrink: 0 })}>
-                  {planLoading ? "..." : "Generate"}
+                <button
+                  onClick={() => generateToday(null)}
+                  disabled={planLoading}
+                  style={{ ...primaryBtn, opacity: planLoading ? 0.6 : 1 }}
+                >
+                  {planLoading ? "..." : todayPlan.length ? "Regenerate" : "Generate"}
                 </button>
               </div>
-              <div style={s({ display: "flex", alignItems: "center", gap: 12, marginTop: 10 })}>
-                <div style={s({ flex: 1, height: 3, background: "#32323e", borderRadius: 99, overflow: "hidden" })}>
-                  <div style={s({ height: "100%", width: progress + "%", background: "#8eaefb", borderRadius: 99, transition: "width 0.4s" })} />
+              <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
+                <div style={{ flex: 1, height: 3, background: "#32323e", borderRadius: 99, overflow: "hidden" }}>
+                  <div
+                    style={{
+                      height: "100%",
+                      width: progress + "%",
+                      background: "#8eaefb",
+                      borderRadius: 99,
+                      transition: "width 0.4s",
+                    }}
+                  />
                 </div>
-                <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68" })}>{todayPlan.filter((b) => b.done).length} / {todayPlan.length}</div>
+                <div style={{ fontSize: 11, ...mono, color: "#706d68" }}>
+                  {completedCount} / {todayPlan.length}
+                </div>
               </div>
             </div>
-            <div style={s({ flex: 1, overflowY: "auto" })}>
-              {!todayPlan.length && <div style={s({ padding: "48px 20px", color: "#706d68", fontFamily: "monospace", fontSize: 12, textAlign: "center" })}>No plan yet. Hit Generate or plan tomorrow in the Tomorrow tab.</div>}
-              {doneTodayBlocks.map((b) => <PlanBlock key={b.id} block={b} onToggle={toggleBlock} onSkip={skipBlock} onReschedule={setRescheduleModal} onStart={startBlock} skipCount={skipPatterns[b.title] || 0} />)}
-              {doneTodayBlocks.length > 0 && pendingTodayBlocks.length > 0 && (
-                <div style={s({ display: "flex", alignItems: "center", gap: 12, padding: "7px 16px 7px 48px" })}>
-                  <div style={s({ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" })} />
-                  <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.1em" })}>Now</div>
-                  <div style={s({ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" })} />
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              {!todayPlan.length && (
+                <div style={{ padding: "48px 20px", color: "#706d68", ...mono, fontSize: 12, textAlign: "center" }}>
+                  No plan yet. Hit Generate, or build tomorrow's plan the night before.
                 </div>
               )}
-              {pendingTodayBlocks.map((b) => <PlanBlock key={b.id} block={b} onToggle={toggleBlock} onSkip={skipBlock} onReschedule={setRescheduleModal} onStart={startBlock} skipCount={skipPatterns[b.title] || 0} />)}
+              {doneBlocks.map((b) => (
+                <PlanBlock
+                  key={b.id}
+                  block={b}
+                  onToggle={toggleBlock}
+                  onSkip={skipBlock}
+                  onReschedule={setRescheduleId}
+                  onStart={startBlock}
+                  skipCount={skipPatterns[b.title] || 0}
+                />
+              ))}
+              {doneBlocks.length > 0 && openBlocks.length > 0 && (
+                <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 16px 7px 48px" }}>
+                  <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" }} />
+                  <div style={sectionLabel}>Now</div>
+                  <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" }} />
+                </div>
+              )}
+              {openBlocks.map((b) => (
+                <PlanBlock
+                  key={b.id}
+                  block={b}
+                  onToggle={toggleBlock}
+                  onSkip={skipBlock}
+                  onReschedule={setRescheduleId}
+                  onStart={startBlock}
+                  skipCount={skipPatterns[b.title] || 0}
+                />
+              ))}
             </div>
           </div>
         )}
 
-        {/* TOMORROW */}
         {tab === "tomorrow" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
-              <div style={s({ fontFamily: "Georgia,serif", fontSize: 18, fontStyle: "italic", color: "#b0aca6" })}>{tomorrowStr}</div>
+          <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
+            <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)" }}>
+              <div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontStyle: "italic", color: "#b0aca6" }}>
+                {tomorrowDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+              </div>
             </div>
-            <div style={s({ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" })}>
-              <div style={s({ padding: "14px 20px 0" })}>
-                <div style={s({ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 })}>
-                  <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.08em" })}>Suggestions for tomorrow</div>
-                  <button onClick={loadTomorrowSuggestions} disabled={suggestionsLoading} style={s({ background: "none", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 6, padding: "4px 10px", fontSize: 11, color: "#706d68", cursor: "pointer", fontFamily: "monospace" })}>{suggestionsLoading ? "..." : "↻ refresh"}</button>
+            <div style={{ flex: 1, overflowY: "auto" }}>
+              <div style={{ padding: "14px 20px 0" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                  <div style={sectionLabel}>Suggestions</div>
+                  <button
+                    onClick={loadSuggestions}
+                    disabled={sugLoading}
+                    style={{
+                      background: "none",
+                      border: "1px solid rgba(255,255,255,0.09)",
+                      borderRadius: 6,
+                      padding: "4px 10px",
+                      fontSize: 11,
+                      color: "#706d68",
+                      cursor: "pointer",
+                      ...mono,
+                    }}
+                  >
+                    {sugLoading ? "..." : "refresh"}
+                  </button>
                 </div>
-                {!tomorrowSuggestions.length && <div style={s({ color: "#706d68", fontSize: 12, fontFamily: "monospace", padding: "8px 0 14px" })}>Hit refresh to load suggestions for tomorrow.</div>}
-                <div style={s({ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 })}>
+                {!tomorrowSuggestions.length && (
+                  <div style={{ color: "#706d68", fontSize: 12, ...mono, padding: "8px 0 14px" }}>
+                    Hit refresh to see what Claude suggests.
+                  </div>
+                )}
+                <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
                   {tomorrowSuggestions.map((sug, i) => {
-                    const isSelected = selectedSuggestions.includes(sug.title);
+                    const sel = selectedSuggestions.includes(sug.title);
                     return (
-                      <div key={i} onClick={() => setSelectedSuggestions((prev) => isSelected ? prev.filter((x) => x !== sug.title) : [...prev, sug.title])} style={s({ background: isSelected ? "rgba(142,174,251,0.1)" : "#22222a", border: `1px solid ${isSelected ? "rgba(142,174,251,0.4)" : "rgba(255,255,255,0.09)"}`, borderRadius: 10, padding: "11px 14px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 10 })}>
-                        <div style={s({ width: 8, height: 8, borderRadius: "50%", background: SUG_COLORS[sug.type] || "#706d68", flexShrink: 0, marginTop: 4 })} />
-                        <div style={s({ flex: 1 })}>
-                          <div style={s({ fontSize: 13, fontWeight: 500, color: "#f2efe9", marginBottom: 2 })}>{sug.title}</div>
-                          <div style={s({ fontSize: 12, color: "#b0aca6", lineHeight: 1.5 })}>{sug.desc}</div>
+                      <div
+                        key={i}
+                        onClick={() =>
+                          setSelectedSuggestions((prev) =>
+                            sel ? prev.filter((x) => x !== sug.title) : [...prev, sug.title]
+                          )
+                        }
+                        style={{
+                          background: sel ? "rgba(142,174,251,0.1)" : "#22222a",
+                          border: `1px solid ${sel ? "rgba(142,174,251,0.4)" : "rgba(255,255,255,0.09)"}`,
+                          borderRadius: 10,
+                          padding: "11px 14px",
+                          cursor: "pointer",
+                          display: "flex",
+                          gap: 10,
+                          alignItems: "flex-start",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 8,
+                            height: 8,
+                            borderRadius: "50%",
+                            background: SUG_COLORS[sug.type] || "#706d68",
+                            flexShrink: 0,
+                            marginTop: 4,
+                          }}
+                        />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 2 }}>{sug.title}</div>
+                          <div style={{ fontSize: 12, color: "#b0aca6", lineHeight: 1.5 }}>{sug.desc}</div>
                         </div>
-                        {isSelected && <div style={s({ color: "#8eaefb", fontSize: 14, flexShrink: 0 })}>✓</div>}
+                        {sel && <div style={{ color: "#8eaefb", fontSize: 14 }}>&#10003;</div>}
                       </div>
                     );
                   })}
@@ -713,396 +1222,1126 @@ Be conversational and direct. Reference their actual data. Always confirm what y
               </div>
 
               {tomorrowPlan.length > 0 && (
-                <div style={s({ padding: "0 20px 14px" })}>
-                  <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 })}>Plan for tomorrow</div>
+                <div style={{ padding: "0 20px 14px" }}>
+                  <div style={{ ...sectionLabel, marginBottom: 10 }}>Plan for tomorrow</div>
                   {tomorrowPlan.map((b) => (
-                    <div key={b.id} style={s({ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 10, padding: "11px 14px", marginBottom: 7 })}>
-                      <div style={s({ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 })}>
-                        <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#8eaefb" })}>{b.time}</div>
-                        {b.duration && <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68" })}>{b.duration}</div>}
-                        <ImpDots imp={b.imp || 2} />
+                    <div key={b.id} style={{ ...card, padding: "11px 14px", marginBottom: 7 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+                        <div style={{ fontSize: 11, ...mono, color: "#8eaefb" }}>{b.time}</div>
+                        {b.duration && <div style={{ fontSize: 10, ...mono, color: "#706d68" }}>{b.duration}</div>}
+                        <ImpDots imp={b.imp} />
                       </div>
-                      <div style={s({ fontSize: 13, fontWeight: 500, color: "#f2efe9", marginBottom: 2 })}>{b.title}</div>
-                      <div style={s({ fontSize: 12, color: "#b0aca6", lineHeight: 1.5 })}>{b.desc}</div>
+                      <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 2 }}>{b.title}</div>
+                      <div style={{ fontSize: 12, color: "#b0aca6", lineHeight: 1.5 }}>{b.desc}</div>
                     </div>
                   ))}
                 </div>
               )}
 
-              <div style={s({ borderTop: "1px solid rgba(255,255,255,0.09)", padding: "12px 20px", flexShrink: 0 })}>
-                <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", marginBottom: 8 })}>
-                  {selectedSuggestions.length > 0 ? `${selectedSuggestions.length} suggestion${selectedSuggestions.length > 1 ? "s" : ""} selected — tell me anything else, or say "generate my plan"` : "Select suggestions above or tell me what you need tomorrow"}
+              <div style={{ borderTop: "1px solid rgba(255,255,255,0.09)", padding: "12px 20px 20px" }}>
+                <div style={{ fontSize: 11, ...mono, color: "#706d68", marginBottom: 8 }}>
+                  {selectedSuggestions.length
+                    ? selectedSuggestions.length + ' selected - add anything else, then say "generate"'
+                    : "Pick suggestions above or just tell me what tomorrow needs"}
                 </div>
-                <div style={s({ maxHeight: 140, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 })}>
-                  {tomorrowChatHistory.map((m, i) => (
-                    <div key={i} style={s({ maxWidth: "90%", padding: "8px 12px", borderRadius: 10, fontSize: 13, lineHeight: 1.6, alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#2a2a34", border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)" })}>{m.content}</div>
+                <div
+                  style={{
+                    maxHeight: 140,
+                    overflowY: "auto",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 8,
+                    marginBottom: 10,
+                  }}
+                >
+                  {tmrChat.map((m, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        maxWidth: "90%",
+                        padding: "8px 12px",
+                        borderRadius: 10,
+                        fontSize: 13,
+                        lineHeight: 1.6,
+                        alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                        background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#2a2a34",
+                        border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)",
+                      }}
+                    >
+                      {m.content}
+                    </div>
                   ))}
-                  {tomorrowChatLoading && <div style={s({ fontSize: 12, color: "#706d68", fontFamily: "monospace" })}>thinking...</div>}
-                  <div ref={tomorrowChatBottomRef} />
+                  {tmrLoading && <div style={{ fontSize: 12, color: "#706d68", ...mono }}>thinking...</div>}
+                  <div ref={tmrEndRef} />
                 </div>
-                <div style={s({ display: "flex", gap: 8 })}>
-                  <input value={tomorrowChatInput} onChange={(e) => setTomorrowChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendTomorrowChat(); }} placeholder="I also need to... / generate my plan" style={s({ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 16, color: "#f2efe9", outline: "none" })} />
-                  <button onClick={sendTomorrowChat} disabled={tomorrowChatLoading} style={s({ background: "rgba(142,174,251,0.16)", border: "1px solid rgba(142,174,251,0.28)", borderRadius: 7, padding: "10px 14px", color: "#8eaefb", fontSize: 12, fontWeight: 500, cursor: "pointer" })}>Send</button>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    value={tmrInput}
+                    onChange={(e) => setTmrInput(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && sendTomorrowChat()}
+                    placeholder="I also need to... / generate"
+                    style={inputStyle}
+                  />
+                  <button
+                    onClick={sendTomorrowChat}
+                    disabled={tmrLoading}
+                    style={{
+                      background: "rgba(142,174,251,0.16)",
+                      border: "1px solid rgba(142,174,251,0.28)",
+                      borderRadius: 7,
+                      padding: "10px 14px",
+                      color: "#8eaefb",
+                      fontSize: 12,
+                      fontWeight: 500,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Send
+                  </button>
                 </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* CALENDAR */}
         {tab === "calendar" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
-
-              <div style={s({ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 })}>
-                <button onClick={() => setCalMonth(new Date(calYear, calMonthIdx - 1, 1))} style={s({ background: "none", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 6, padding: "5px 12px", fontSize: 13, color: "#b0aca6", cursor: "pointer" })}>‹</button>
-                <div style={s({ fontFamily: "Georgia,serif", fontSize: 17, fontStyle: "italic", color: "#f2efe9" })}>
-                  {calMonth.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
-                </div>
-                <button onClick={() => setCalMonth(new Date(calYear, calMonthIdx + 1, 1))} style={s({ background: "none", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 6, padding: "5px 12px", fontSize: 13, color: "#b0aca6", cursor: "pointer" })}>›</button>
+          <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <button
+                onClick={() => setCalMonth(new Date(calY, calM - 1, 1))}
+                style={{
+                  background: "none",
+                  border: "1px solid rgba(255,255,255,0.09)",
+                  borderRadius: 6,
+                  padding: "5px 12px",
+                  color: "#b0aca6",
+                  cursor: "pointer",
+                }}
+              >
+                &lsaquo;
+              </button>
+              <div style={{ fontFamily: "Georgia,serif", fontSize: 17, fontStyle: "italic" }}>
+                {calMonth.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
               </div>
+              <button
+                onClick={() => setCalMonth(new Date(calY, calM + 1, 1))}
+                style={{
+                  background: "none",
+                  border: "1px solid rgba(255,255,255,0.09)",
+                  borderRadius: 6,
+                  padding: "5px 12px",
+                  color: "#b0aca6",
+                  cursor: "pointer",
+                }}
+              >
+                &rsaquo;
+              </button>
+            </div>
 
-              <div style={s({ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 6 })}>
-                {["S","M","T","W","T","F","S"].map((d, i) => (
-                  <div key={i} style={s({ textAlign: "center", fontSize: 10, fontFamily: "monospace", color: "#4a4a55", padding: "4px 0" })}>{d}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4, marginBottom: 6 }}>
+              {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
+                <div key={i} style={{ textAlign: "center", fontSize: 10, ...mono, color: "#4a4a55" }}>
+                  {d}
+                </div>
+              ))}
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4, marginBottom: 18 }}>
+              {Array.from({ length: firstDow }).map((_, i) => (
+                <div key={"pad" + i} />
+              ))}
+              {Array.from({ length: daysInMonth }).map((_, i) => {
+                const day = i + 1;
+                const k = `${calY}-${String(calM + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+                const isToday = k === todayK;
+                const isSel = k === calSelected;
+                const has = dayHasData(k);
+                return (
+                  <div
+                    key={k}
+                    onClick={() => setCalSelected(k)}
+                    style={{
+                      aspectRatio: "1",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 2,
+                      borderRadius: 8,
+                      cursor: "pointer",
+                      background: isSel ? "rgba(142,174,251,0.16)" : isToday ? "#2a2a34" : "none",
+                      border: isSel
+                        ? "1px solid rgba(142,174,251,0.4)"
+                        : isToday
+                        ? "1px solid rgba(255,255,255,0.14)"
+                        : "1px solid transparent",
+                    }}
+                  >
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: isSel ? "#8eaefb" : isToday ? "#f2efe9" : "#706d68",
+                        fontWeight: isToday || isSel ? 500 : 400,
+                      }}
+                    >
+                      {day}
+                    </div>
+                    {has && (
+                      <div style={{ width: 4, height: 4, borderRadius: "50%", background: isSel ? "#8eaefb" : "#4a4a55" }} />
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ ...sectionLabel, marginBottom: 10 }}>
+              {selectedDateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+              {calSelected === todayK ? " - today" : calSelected === tomorrowK ? " - tomorrow" : ""}
+            </div>
+
+            {!selectedPlan.length && !selectedHistory && (
+              <div style={{ color: "#706d68", fontSize: 12, ...mono, padding: "12px 0" }}>
+                nothing recorded for this day
+              </div>
+            )}
+
+            {selectedPlan.map((b) => (
+              <div
+                key={b.id}
+                style={{
+                  ...card,
+                  padding: "11px 14px",
+                  marginBottom: 7,
+                  opacity: b.done || b.status === "skipped" ? 0.45 : 1,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+                  <div style={{ fontSize: 11, ...mono, color: "#8eaefb" }}>{b.time}</div>
+                  {b.duration && <div style={{ fontSize: 10, ...mono, color: "#706d68" }}>{b.duration}</div>}
+                  <ImpDots imp={b.imp} />
+                  {b.done && <span style={{ marginLeft: "auto", fontSize: 10, ...mono, color: "#81c995" }}>done</span>}
+                  {b.status === "skipped" && (
+                    <span style={{ marginLeft: "auto", fontSize: 10, ...mono, color: "#706d68" }}>skipped</span>
+                  )}
+                </div>
+                <div
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 500,
+                    textDecoration: b.done || b.status === "skipped" ? "line-through" : "none",
+                  }}
+                >
+                  {b.title}
+                </div>
+                <div style={{ fontSize: 12, color: "#b0aca6", lineHeight: 1.5, marginTop: 2 }}>{b.desc}</div>
+              </div>
+            ))}
+
+            {selectedHistory && (
+              <div style={{ marginTop: 14 }}>
+                <div style={{ ...sectionLabel, marginBottom: 6 }}>Activity</div>
+                {selectedHistory.entries.map((e, i) => (
+                  <div key={i} style={{ display: "flex", gap: 8, padding: "5px 0", fontSize: 12, color: "#b0aca6" }}>
+                    <span style={{ color: e.type === "task" ? "#81c995" : e.type === "habit" ? "#edbe80" : "#706d68" }}>
+                      &bull;
+                    </span>
+                    <span style={{ flex: 1 }}>{e.text}</span>
+                    {e.time && <span style={{ fontSize: 10, ...mono, color: "#4a4a55" }}>{e.time}</span>}
+                  </div>
                 ))}
               </div>
+            )}
+          </div>
+        )}
 
-              <div style={s({ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 18 })}>
-                {Array.from({ length: firstDayOfWeek }).map((_, i) => <div key={"e" + i} />)}
-                {Array.from({ length: daysInMonth }).map((_, i) => {
-                  const dayNum = i + 1;
-                  const key = `${calYear}-${String(calMonthIdx + 1).padStart(2, "0")}-${String(dayNum).padStart(2, "0")}`;
-                  const isToday = key === todayKey;
-                  const isTomorrow = key === tomorrowKey;
-                  const isSelected = key === calSelected;
-                  const hasData = dayHasData(key);
+        {tab === "chat" && (
+          <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
+            <div
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+                gap: 10,
+                padding: "16px 20px",
+              }}
+            >
+              <div
+                style={{
+                  maxWidth: "85%",
+                  padding: "10px 14px",
+                  borderRadius: 12,
+                  fontSize: 13,
+                  lineHeight: 1.65,
+                  background: "#22222a",
+                  border: "1px solid rgba(255,255,255,0.09)",
+                  alignSelf: "flex-start",
+                }}
+              >
+                Tell me anything - add a goal, check something off, dump what's on your mind, or say your day went
+                sideways and I'll rebuild the plan.
+              </div>
+              {chatHistory.map((m, i) => (
+                <div
+                  key={i}
+                  style={{
+                    maxWidth: "85%",
+                    padding: "10px 14px",
+                    borderRadius: 12,
+                    fontSize: 13,
+                    lineHeight: 1.65,
+                    whiteSpace: "pre-wrap",
+                    alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                    background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#22222a",
+                    border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)",
+                  }}
+                >
+                  {m.content}
+                </div>
+              ))}
+              {chatLoading && <div style={{ fontSize: 12, color: "#706d68", ...mono }}>thinking...</div>}
+              <div ref={chatEndRef} />
+            </div>
+            <div
+              style={{ display: "flex", gap: 8, padding: "12px 20px 20px", borderTop: "1px solid rgba(255,255,255,0.09)" }}
+            >
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && sendChat()}
+                placeholder="What's going on..."
+                style={inputStyle}
+              />
+              <button
+                onClick={sendChat}
+                disabled={chatLoading}
+                style={{
+                  background: "rgba(142,174,251,0.16)",
+                  border: "1px solid rgba(142,174,251,0.28)",
+                  borderRadius: 7,
+                  padding: "10px 16px",
+                  color: "#8eaefb",
+                  fontSize: 12,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                }}
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        )}
+
+        {tab === "goals" && (
+          <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
+            <div
+              style={{
+                padding: "14px 20px",
+                borderBottom: "1px solid rgba(255,255,255,0.09)",
+                display: "flex",
+                justifyContent: "flex-end",
+              }}
+            >
+              <button
+                onClick={() => setGoalModal({ name: "", area: "Fitness", desc: "", deadline: "", p: "front" })}
+                style={primaryBtn}
+              >
+                + Add
+              </button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+              {!goals.length && (
+                <div style={{ color: "#706d68", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
+                  no goals yet
+                </div>
+              )}
+              {[...goals]
+                .sort((a, b) => ["front", "maint", "back"].indexOf(a.p) - ["front", "maint", "back"].indexOf(b.p))
+                .map((g) => (
+                  <div
+                    key={g.id}
+                    onClick={() => setGoalModal(g)}
+                    style={{
+                      ...card,
+                      borderLeft: `3px solid ${g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68"}`,
+                      padding: "14px 16px",
+                      marginBottom: 10,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <div style={{ fontSize: 14, fontWeight: 500 }}>{g.name}</div>
+                      <div
+                        style={{
+                          fontSize: 10,
+                          ...mono,
+                          color: "#706d68",
+                          background: "#32323e",
+                          padding: "3px 8px",
+                          borderRadius: 99,
+                          marginLeft: 8,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {g.area}
+                      </div>
+                    </div>
+                    {g.desc && <div style={{ fontSize: 12.5, color: "#b0aca6", marginTop: 6, lineHeight: 1.6 }}>{g.desc}</div>}
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
+                      <div
+                        style={{
+                          fontSize: 11,
+                          ...mono,
+                          color: g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68",
+                        }}
+                      >
+                        {g.p === "front" ? "front burner" : g.p === "maint" ? "maintenance" : "back burner"}
+                      </div>
+                      {g.deadline && (
+                        <div style={{ fontSize: 11, ...mono, color: "#706d68", marginLeft: "auto" }}>{g.deadline}</div>
+                      )}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setGoals((prev) => prev.filter((x) => x.id !== g.id));
+                          toast("Deleted goal");
+                        }}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          cursor: "pointer",
+                          color: "#706d68",
+                          marginLeft: g.deadline ? 0 : "auto",
+                          fontSize: 12,
+                        }}
+                      >
+                        &times;
+                      </button>
+                    </div>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "tasks" && (
+          <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
+            <div
+              style={{
+                padding: "14px 20px",
+                borderBottom: "1px solid rgba(255,255,255,0.09)",
+                display: "flex",
+                justifyContent: "flex-end",
+              }}
+            >
+              <button onClick={() => setTaskModal({ name: "", due: "", goal: "", imp: 2, done: false })} style={primaryBtn}>
+                + Add
+              </button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+              <div style={{ ...sectionLabel, marginBottom: 8 }}>Pending</div>
+              {tasks
+                .filter((t) => !t.done)
+                .sort((a, b) => (b.imp || 1) - (a.imp || 1))
+                .map((t) => (
+                  <TaskCard
+                    key={t.id}
+                    task={t}
+                    onToggle={(id) => setTasks((prev) => prev.map((x) => (x.id === id ? { ...x, done: !x.done } : x)))}
+                    onEdit={setTaskModal}
+                    onDelete={(id) => setTasks((prev) => prev.filter((x) => x.id !== id))}
+                  />
+                ))}
+              {!tasks.filter((t) => !t.done).length && (
+                <div style={{ color: "#706d68", fontSize: 12, ...mono, padding: "12px 0" }}>no pending tasks</div>
+              )}
+              {tasks.some((t) => t.done) && (
+                <>
+                  <div style={{ ...sectionLabel, margin: "20px 0 8px" }}>Completed</div>
+                  {tasks
+                    .filter((t) => t.done)
+                    .map((t) => (
+                      <TaskCard
+                        key={t.id}
+                        task={t}
+                        onToggle={(id) => setTasks((prev) => prev.map((x) => (x.id === id ? { ...x, done: !x.done } : x)))}
+                        onEdit={setTaskModal}
+                        onDelete={(id) => setTasks((prev) => prev.filter((x) => x.id !== id))}
+                      />
+                    ))}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {tab === "habits" && (
+          <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
+            <div
+              style={{
+                padding: "14px 20px",
+                borderBottom: "1px solid rgba(255,255,255,0.09)",
+                display: "flex",
+                justifyContent: "flex-end",
+              }}
+            >
+              <button onClick={() => setHabitModal({ name: "", freq: "", note: "" })} style={primaryBtn}>
+                + Add
+              </button>
+            </div>
+            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+              <div
+                style={{
+                  background: "#2a2a34",
+                  borderRadius: 7,
+                  padding: "10px 14px",
+                  fontSize: 11,
+                  color: "#706d68",
+                  lineHeight: 1.6,
+                  marginBottom: 14,
+                  borderLeft: "3px solid rgba(237,190,128,0.3)",
+                }}
+              >
+                These shape how Claude builds your plan. Any frequency works - daily, 3x a week, every other week.
+              </div>
+              {!habits.length && (
+                <div style={{ color: "#706d68", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
+                  no habits yet
+                </div>
+              )}
+              {habits.map((h) => (
+                <div
+                  key={h.id}
+                  style={{ ...card, padding: "13px 15px", marginBottom: 9, display: "flex", alignItems: "center", gap: 12 }}
+                >
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>{h.name}</div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span
+                        style={{
+                          fontSize: 10,
+                          ...mono,
+                          color: "#706d68",
+                          background: "#32323e",
+                          padding: "2px 7px",
+                          borderRadius: 99,
+                        }}
+                      >
+                        {h.freq || "custom"}
+                      </span>
+                      {h.note && <span style={{ fontSize: 11, color: "#706d68", ...mono }}>{h.note}</span>}
+                    </div>
+                    <div style={{ display: "flex", gap: 3, marginTop: 7 }}>
+                      {(h.week || [0, 0, 0, 0, 0, 0, 0]).map((d, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            width: 7,
+                            height: 7,
+                            borderRadius: "50%",
+                            background: i === 6 && h.tickedToday ? "#81c995" : d ? "#edbe80" : "#32323e",
+                          }}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                  {h.streak > 0 && <div style={{ fontSize: 11, ...mono, color: "#edbe80" }}>{h.streak}d</div>}
+                  <div
+                    onClick={() => tickHabit(h.id)}
+                    style={{
+                      width: 28,
+                      height: 28,
+                      border: `1.5px solid ${h.tickedToday ? "#81c995" : "rgba(255,255,255,0.22)"}`,
+                      borderRadius: 8,
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      background: h.tickedToday ? "rgba(129,201,149,0.12)" : "none",
+                      color: "#81c995",
+                      fontSize: 13,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {h.tickedToday ? "\u2713" : ""}
+                  </div>
+                  <button
+                    onClick={() => {
+                      setHabits((prev) => prev.filter((x) => x.id !== h.id));
+                      toast("Deleted habit");
+                    }}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "ideas" && (
+          <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              <input
+                value={ideaInput}
+                onChange={(e) => setIdeaInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && ideaInput.trim()) {
+                    if (!ideas.some((i) => norm(i.t) === norm(ideaInput))) {
+                      setIdeas((prev) => [...prev, { id: uid(), t: ideaInput.trim() }]);
+                    }
+                    setIdeaInput("");
+                  }
+                }}
+                placeholder="Drop an idea, no commitment..."
+                style={inputStyle}
+              />
+              <button
+                onClick={() => {
+                  if (ideaInput.trim() && !ideas.some((i) => norm(i.t) === norm(ideaInput))) {
+                    setIdeas((prev) => [...prev, { id: uid(), t: ideaInput.trim() }]);
+                  }
+                  setIdeaInput("");
+                }}
+                style={primaryBtn}
+              >
+                Add
+              </button>
+            </div>
+            {!ideas.length && (
+              <div style={{ color: "#706d68", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
+                nothing parked here yet
+              </div>
+            )}
+            {ideas.map((i) => (
+              <div
+                key={i.id}
+                style={{ ...card, padding: "11px 15px", marginBottom: 7, display: "flex", alignItems: "center", gap: 10 }}
+              >
+                <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#b8a0fc", opacity: 0.8, flexShrink: 0 }} />
+                <div style={{ flex: 1, fontSize: 13, color: "#b0aca6" }}>{i.t}</div>
+                <button
+                  onClick={() => {
+                    setChatInput("Promote this idea to a goal: " + i.t);
+                    setTab("chat");
+                  }}
+                  style={{
+                    fontSize: 10,
+                    ...mono,
+                    padding: "3px 8px",
+                    borderRadius: 5,
+                    border: "1px solid rgba(184,160,252,0.3)",
+                    background: "none",
+                    color: "#b8a0fc",
+                    cursor: "pointer",
+                    flexShrink: 0,
+                  }}
+                >
+                  &rarr; goal
+                </button>
+                <button
+                  onClick={() => setIdeas((prev) => prev.filter((x) => x.id !== i.id))}
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}
+                >
+                  &times;
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === "history" && (
+          <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
+            {!history.length && (
+              <div style={{ color: "#706d68", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
+                no history yet
+              </div>
+            )}
+            {history.map((day, di) => (
+              <div key={di} style={{ marginBottom: 22 }}>
+                <div style={{ ...sectionLabel, marginBottom: 9 }}>{day.date}</div>
+                {day.entries.map((e, ei) => {
+                  const color =
+                    e.type === "task"
+                      ? "#8eaefb"
+                      : e.type === "habit"
+                      ? "#edbe80"
+                      : e.type === "reschedule"
+                      ? "#f0c060"
+                      : "#706d68";
                   return (
-                    <div key={key} onClick={() => setCalSelected(key)} style={s({ aspectRatio: "1", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, borderRadius: 8, cursor: "pointer", background: isSelected ? "rgba(142,174,251,0.16)" : isToday ? "#2a2a34" : "none", border: isSelected ? "1px solid rgba(142,174,251,0.4)" : isToday ? "1px solid rgba(255,255,255,0.14)" : "1px solid transparent" })}>
-                      <div style={s({ fontSize: 12, color: isSelected ? "#8eaefb" : isToday ? "#f2efe9" : isTomorrow ? "#b0aca6" : "#706d68", fontWeight: isToday || isSelected ? 500 : 400 })}>{dayNum}</div>
-                      {hasData && <div style={s({ width: 4, height: 4, borderRadius: "50%", background: isSelected ? "#8eaefb" : "#4a4a55" })} />}
+                    <div
+                      key={ei}
+                      style={{
+                        ...card,
+                        borderRadius: 7,
+                        padding: "9px 13px",
+                        marginBottom: 5,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 9,
+                      }}
+                    >
+                      <div style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
+                      <div style={{ flex: 1, fontSize: 12.5, color: "#b0aca6" }}>{e.text}</div>
+                      {e.time && <div style={{ fontSize: 10, ...mono, color: "#706d68" }}>{e.time}</div>}
                     </div>
                   );
                 })}
               </div>
-
-              <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 10 })}>
-                {selectedDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
-                {calSelected === todayKey ? " — today" : calSelected === tomorrowKey ? " — tomorrow" : ""}
-              </div>
-
-              {!selectedPlan.length && !selectedHistory && (
-                <div style={s({ color: "#706d68", fontSize: 12, fontFamily: "monospace", padding: "12px 0" })}>nothing recorded for this day</div>
-              )}
-
-              {selectedPlan.length > 0 && (
-                <div style={s({ marginBottom: 16 })}>
-                  {selectedPlan.map((b) => (
-                    <div key={b.id} style={s({ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 10, padding: "11px 14px", marginBottom: 7, opacity: b.done || b.status === "skipped" ? 0.45 : 1 })}>
-                      <div style={s({ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 })}>
-                        <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#8eaefb" })}>{b.time}</div>
-                        {b.duration && <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68" })}>{b.duration}</div>}
-                        <ImpDots imp={b.imp || 2} />
-                        {b.done && <span style={s({ marginLeft: "auto", fontSize: 10, fontFamily: "monospace", color: "#81c995" })}>✓ done</span>}
-                        {b.status === "skipped" && <span style={s({ marginLeft: "auto", fontSize: 10, fontFamily: "monospace", color: "#706d68" })}>skipped</span>}
-                      </div>
-                      <div style={s({ fontSize: 13, fontWeight: 500, color: "#f2efe9", textDecoration: b.done || b.status === "skipped" ? "line-through" : "none" })}>{b.title}</div>
-                      <div style={s({ fontSize: 12, color: "#b0aca6", lineHeight: 1.5, marginTop: 2 })}>{b.desc}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {selectedHistory && (
-                <div>
-                  <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#4a4a55", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 6 })}>Activity log</div>
-                  {selectedHistory.entries.map((e, ei) => (
-                    <div key={ei} style={s({ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", fontSize: 12, color: "#b0aca6" })}>
-                      <span style={s({ color: e.type === "task" ? "#81c995" : e.type === "habit" ? "#edbe80" : "#706d68", fontSize: 11 })}>{e.type === "task" ? "✓" : e.type === "habit" ? "⚡" : "•"}</span>
-                      <span style={s({ flex: 1 })}>{e.text}</span>
-                      {e.time && <span style={s({ fontSize: 10, fontFamily: "monospace", color: "#4a4a55" })}>{e.time}</span>}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-            </div>
-          </div>
-        )}
-
-        {/* CHAT */}
-        {tab === "chat" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: "16px 20px" })}>
-              <div style={s({ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", alignSelf: "flex-start", borderBottomLeftRadius: 3 })}>
-                Hey — I'm Locus. Tell me anything: add goals, check off tasks, brain dump what's on your mind, ask me to search for something. I'll handle it and remember the context.
-              </div>
-              {chatHistory.map((m, i) => (
-                <div key={i} style={s({ maxWidth: "85%", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.65, whiteSpace: "pre-wrap", alignSelf: m.role === "user" ? "flex-end" : "flex-start", background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#22222a", border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)", borderBottomRightRadius: m.role === "user" ? 3 : 12, borderBottomLeftRadius: m.role === "user" ? 12 : 3 })}>{m.content}</div>
-              ))}
-              {chatLoading && <div style={s({ fontSize: 12, color: "#706d68", fontFamily: "monospace", alignSelf: "flex-start" })}>thinking...</div>}
-              <div ref={chatBottomRef} />
-            </div>
-            <div style={s({ display: "flex", gap: 8, padding: "12px 20px 20px", borderTop: "1px solid rgba(255,255,255,0.09)", flexShrink: 0 })}>
-              <input value={chatInput} onChange={(e) => setChatInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") sendChat(); }} placeholder="Add a goal, brain dump, search for something..." style={s({ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 16, color: "#f2efe9", outline: "none" })} />
-              <button onClick={sendChat} disabled={chatLoading} style={s({ background: "rgba(142,174,251,0.16)", border: "1px solid rgba(142,174,251,0.28)", borderRadius: 7, padding: "10px 16px", color: "#8eaefb", fontSize: 12, fontWeight: 500, cursor: "pointer" })}>Send</button>
-            </div>
-          </div>
-        )}
-
-        {/* GOALS */}
-        {tab === "goals" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" })}>
-              <button onClick={() => setGoalModal({ name: "", area: "Fitness", desc: "", deadline: "", p: "front" })} style={s({ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" })}>+ Add</button>
-            </div>
-            <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
-              {!goals.length && <div style={s({ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" })}>no goals yet — tell Claude to add some</div>}
-              {[...goals].sort((a, b) => ["front","maint","back"].indexOf(a.p) - ["front","maint","back"].indexOf(b.p)).map((g) => (
-                <div key={g.id} onClick={() => setGoalModal(g)} style={s({ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderLeft: `3px solid ${g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68"}`, borderRadius: 12, padding: "14px 16px", marginBottom: 10, cursor: "pointer" })}>
-                  <div style={s({ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginLeft: 4 })}>
-                    <div style={s({ fontSize: 14, fontWeight: 500 })}>{g.name}</div>
-                    <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68", background: "#32323e", padding: "3px 8px", borderRadius: 99, flexShrink: 0, marginLeft: 8 })}>{g.area}</div>
-                  </div>
-                  {g.desc && <div style={s({ fontSize: 12.5, color: "#b0aca6", marginTop: 6, marginLeft: 4, lineHeight: 1.6 })}>{g.desc}</div>}
-                  <div style={s({ display: "flex", alignItems: "center", gap: 10, marginTop: 10, marginLeft: 4 })}>
-                    <div style={s({ fontSize: 11, fontFamily: "monospace", color: g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68" })}>{g.p === "front" ? "front burner" : g.p === "maint" ? "maintenance" : "back burner"}</div>
-                    {g.deadline && <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", marginLeft: "auto" })}>{g.deadline}</div>}
-                    <button onClick={(e) => { e.stopPropagation(); setGoals((prev) => prev.filter((x) => x.id !== g.id)); }} style={s({ background: "none", border: "none", cursor: "pointer", color: "#706d68", marginLeft: g.deadline ? 0 : "auto", fontSize: 12 })}>x</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* TASKS */}
-        {tab === "tasks" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" })}>
-              <button onClick={() => setTaskModal({ name: "", due: "", goal: "", desc: "", imp: 2, done: false })} style={s({ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" })}>+ Add</button>
-            </div>
-            <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
-              <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 8 })}>Pending</div>
-              {tasks.filter((t) => !t.done).sort((a, b) => (b.imp || 1) - (a.imp || 1)).map((t) => (
-                <TaskCard key={t.id} task={t} goals={goals} onToggle={(id) => setTasks((prev) => prev.map((x) => x.id === id ? { ...x, done: !x.done } : x))} onEdit={setTaskModal} onDelete={(id) => setTasks((prev) => prev.filter((x) => x.id !== id))} />
-              ))}
-              {!tasks.filter((t) => !t.done).length && <div style={s({ color: "#706d68", fontSize: 12, fontFamily: "monospace", padding: "12px 0" })}>no pending tasks</div>}
-              <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.1em", margin: "20px 0 8px" })}>Completed</div>
-              {tasks.filter((t) => t.done).map((t) => (
-                <TaskCard key={t.id} task={t} goals={goals} onToggle={(id) => setTasks((prev) => prev.map((x) => x.id === id ? { ...x, done: !x.done } : x))} onEdit={setTaskModal} onDelete={(id) => setTasks((prev) => prev.filter((x) => x.id !== id))} />
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* HABITS */}
-        {tab === "habits" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)", display: "flex", justifyContent: "flex-end" })}>
-              <button onClick={() => setHabitModal({ name: "", freq: "", note: "" })} style={s({ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "8px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" })}>+ Add</button>
-            </div>
-            <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
-              <div style={s({ background: "#2a2a34", borderRadius: 7, padding: "10px 14px", fontSize: 11, color: "#706d68", lineHeight: 1.6, marginBottom: 14, borderLeft: "3px solid rgba(237,190,128,0.3)" })}>Not tasks — these shape how Claude builds your plan. Any frequency works: daily, 3x/week, every 2 weeks, monthly.</div>
-              {!habits.length && <div style={s({ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" })}>no habits yet</div>}
-              {habits.map((h) => (
-                <div key={h.id} style={s({ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 12, padding: "13px 15px", marginBottom: 9, display: "flex", alignItems: "center", gap: 12 })}>
-                  <div style={s({ flex: 1 })}>
-                    <div style={s({ fontSize: 14, fontWeight: 500, marginBottom: 4 })}>{h.name}</div>
-                    <div style={s({ display: "flex", alignItems: "center", gap: 8 })}>
-                      <span style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68", background: "#32323e", padding: "2px 7px", borderRadius: 99 })}>{h.freq || "custom"}</span>
-                      {h.note && <span style={s({ fontSize: 11, color: "#706d68", fontFamily: "monospace" })}>{h.note}</span>}
-                    </div>
-                    <div style={s({ display: "flex", gap: 3, marginTop: 7 })}>
-                      {(h.history || [0,0,0,0,0,0,0]).map((d, i) => (
-                        <div key={i} style={s({ width: 7, height: 7, borderRadius: "50%", background: i === 6 && h.tickedToday ? "#81c995" : d ? "#edbe80" : "#32323e" })} />
-                      ))}
-                    </div>
-                  </div>
-                  {h.streak > 0 && <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#edbe80" })}>&#9889;{h.streak}</div>}
-                  <div onClick={() => {
-                    if (navigator.vibrate) navigator.vibrate([15, 10, 25]);
-                    setHabits((prev) => prev.map((x) => {
-                      if (x.id !== h.id) return x;
-                      const ticked = !x.tickedToday;
-                      if (ticked) addHistory("habit", `Habit done: ${x.name}`);
-                      return { ...x, tickedToday: ticked, streak: ticked ? x.streak + 1 : Math.max(0, x.streak - 1), history: [...(x.history || [0,0,0,0,0,0,0]).slice(1), ticked ? 1 : 0] };
-                    }));
-                  }} style={s({ width: 28, height: 28, border: `1.5px solid ${h.tickedToday ? "#81c995" : "rgba(255,255,255,0.22)"}`, borderRadius: 8, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: h.tickedToday ? "rgba(129,201,149,0.12)" : "none", color: "#81c995", fontSize: 13 })}>
-                    {h.tickedToday ? "✓" : ""}
-                  </div>
-                  <button onClick={() => setHabits((prev) => prev.filter((x) => x.id !== h.id))} style={s({ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 })}>x</button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* IDEAS */}
-        {tab === "ideas" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
-              <div style={s({ display: "flex", gap: 8, marginBottom: 14 })}>
-                <input value={ideaInput} onChange={(e) => setIdeaInput(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && ideaInput.trim()) { setIdeas((prev) => [...prev, { id: Date.now().toString(), t: ideaInput.trim() }]); setIdeaInput(""); }}} placeholder="Drop an idea, no commitment..." style={s({ flex: 1, background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "10px 14px", fontSize: 16, color: "#f2efe9", outline: "none" })} />
-                <button onClick={() => { if (ideaInput.trim()) { setIdeas((prev) => [...prev, { id: Date.now().toString(), t: ideaInput.trim() }]); setIdeaInput(""); }}} style={s({ background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, padding: "10px 14px", fontSize: 12, fontWeight: 500, cursor: "pointer" })}>Add</button>
-              </div>
-              {ideas.map((i) => (
-                <div key={i.id} style={s({ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 12, padding: "11px 15px", marginBottom: 7, display: "flex", alignItems: "center", gap: 10 })}>
-                  <div style={s({ width: 7, height: 7, borderRadius: "50%", background: "#b8a0fc", opacity: 0.8, flexShrink: 0 })} />
-                  <div style={s({ flex: 1, fontSize: 13, color: "#b0aca6" })}>{i.t}</div>
-                  <button onClick={() => { setChatInput(`Promote idea to goal: ${i.t}`); setTab("chat"); }} style={s({ fontSize: 10, fontFamily: "monospace", padding: "3px 8px", borderRadius: 5, border: "1px solid rgba(184,160,252,0.3)", background: "none", color: "#b8a0fc", cursor: "pointer", flexShrink: 0 })}>→ goal</button>
-                  <button onClick={() => setIdeas((prev) => prev.filter((x) => x.id !== i.id))} style={s({ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 })}>x</button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* HISTORY */}
-        {tab === "history" && (
-          <div style={s({ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" })}>
-            <div style={s({ flex: 1, overflowY: "auto", padding: "16px 20px" })}>
-              {!history.length && <div style={s({ color: "#706d68", fontSize: 12, fontFamily: "monospace", textAlign: "center", padding: "28px 0" })}>no history yet</div>}
-              {history.map((day, di) => (
-                <div key={di} style={s({ marginBottom: 22 })}>
-                  <div style={s({ fontSize: 11, fontFamily: "monospace", color: "#706d68", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 9 })}>{day.date}</div>
-                  {day.entries.map((e, ei) => {
-                    const meta = { task: { bg: "rgba(142,174,251,0.16)", color: "#8eaefb", icon: "✓" }, habit: { bg: "rgba(237,190,128,0.13)", color: "#edbe80", icon: "!" }, skip: { bg: "#32323e", color: "#706d68", icon: "-" }, reschedule: { bg: "rgba(240,192,96,0.12)", color: "#f0c060", icon: "r" } }[e.type] || { bg: "#32323e", color: "#706d68", icon: "." };
-                    return (
-                      <div key={ei} style={s({ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, padding: "9px 13px", marginBottom: 5, display: "flex", alignItems: "center", gap: 9 })}>
-                        <div style={s({ width: 20, height: 20, borderRadius: "50%", background: meta.bg, color: meta.color, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, flexShrink: 0 })}>{meta.icon}</div>
-                        <div style={s({ flex: 1, fontSize: 12.5, color: "#b0aca6" })}>{e.text}</div>
-                        {e.time && <div style={s({ fontSize: 10, fontFamily: "monospace", color: "#706d68" })}>{e.time}</div>}
-                      </div>
-                    );
-                  })}
-                </div>
-              ))}
-            </div>
+            ))}
           </div>
         )}
       </div>
 
-      {/* MODALS */}
       {goalModal && (
         <Modal onClose={() => setGoalModal(null)} title={goalModal.id ? "Edit goal" : "Add goal"}>
-          <Field label="Goal name"><input value={goalModal.name} onChange={(e) => setGoalModal((m) => ({ ...m, name: e.target.value }))} placeholder="e.g. Land a fintech role" /></Field>
+          <Field label="Goal name">
+            <input
+              value={goalModal.name}
+              onChange={(e) => setGoalModal((m) => ({ ...m, name: e.target.value }))}
+              placeholder="e.g. Land a fintech SE role"
+            />
+          </Field>
           <Field label="Life area">
             <select value={goalModal.area} onChange={(e) => setGoalModal((m) => ({ ...m, area: e.target.value }))}>
-              {["Fitness","Career","Learning","Social","Finance","Health","Creative","Other"].map((a) => <option key={a}>{a}</option>)}
+              {["Fitness", "Career", "Learning", "Social", "Finance", "Health", "Creative", "Other"].map((a) => (
+                <option key={a}>{a}</option>
+              ))}
             </select>
           </Field>
-          <Field label="Description"><textarea value={goalModal.desc} onChange={(e) => setGoalModal((m) => ({ ...m, desc: e.target.value }))} placeholder="Why this matters..." /></Field>
-          <Field label="Target timeframe"><input value={goalModal.deadline} onChange={(e) => setGoalModal((m) => ({ ...m, deadline: e.target.value }))} placeholder="e.g. Spring 2027" /></Field>
+          <Field label="Description">
+            <textarea
+              value={goalModal.desc}
+              onChange={(e) => setGoalModal((m) => ({ ...m, desc: e.target.value }))}
+              placeholder="Why this matters..."
+            />
+          </Field>
+          <Field label="Target timeframe">
+            <input
+              value={goalModal.deadline}
+              onChange={(e) => setGoalModal((m) => ({ ...m, deadline: e.target.value }))}
+              placeholder="e.g. Spring 2027"
+            />
+          </Field>
           <Field label="Priority">
             <div style={{ display: "flex", gap: 6 }}>
-              {[["front","Front"],["maint","Maint"],["back","Back"]].map(([val, label]) => (
-                <button key={val} onClick={() => setGoalModal((m) => ({ ...m, p: val }))} style={{ flex: 1, padding: "8px 4px", fontSize: 11, fontFamily: "monospace", border: `1px solid ${goalModal.p === val ? "#8eaefb" : "rgba(255,255,255,0.09)"}`, borderRadius: 7, background: goalModal.p === val ? "rgba(142,174,251,0.16)" : "none", color: goalModal.p === val ? "#8eaefb" : "#706d68", cursor: "pointer" }}>{label}</button>
+              {[
+                ["front", "Front"],
+                ["maint", "Maint"],
+                ["back", "Back"],
+              ].map(([val, label]) => (
+                <button
+                  key={val}
+                  onClick={() => setGoalModal((m) => ({ ...m, p: val }))}
+                  style={{
+                    flex: 1,
+                    padding: "8px 4px",
+                    fontSize: 11,
+                    ...mono,
+                    border: `1px solid ${goalModal.p === val ? "#8eaefb" : "rgba(255,255,255,0.09)"}`,
+                    borderRadius: 7,
+                    background: goalModal.p === val ? "rgba(142,174,251,0.16)" : "none",
+                    color: goalModal.p === val ? "#8eaefb" : "#706d68",
+                    cursor: "pointer",
+                  }}
+                >
+                  {label}
+                </button>
               ))}
             </div>
           </Field>
-          <ModalActions onCancel={() => setGoalModal(null)} onSave={() => {
-            if (!goalModal.name.trim()) return;
-            const g = { ...goalModal, id: goalModal.id || Date.now().toString() };
-            setGoals((prev) => goalModal.id ? prev.map((x) => x.id === g.id ? g : x) : [...prev, g]);
-            setGoalModal(null);
-          }} />
+          <ModalActions
+            onCancel={() => setGoalModal(null)}
+            onSave={() => {
+              const name = goalModal.name.trim();
+              if (!name) return;
+              if (!goalModal.id && goals.some((g) => norm(g.name) === norm(name))) {
+                toast("That goal already exists");
+                setGoalModal(null);
+                return;
+              }
+              const g = { ...goalModal, name, id: goalModal.id || uid() };
+              setGoals((prev) => (goalModal.id ? prev.map((x) => (x.id === g.id ? g : x)) : [...prev, g]));
+              setGoalModal(null);
+            }}
+          />
         </Modal>
       )}
 
       {taskModal && (
         <Modal onClose={() => setTaskModal(null)} title={taskModal.id ? "Edit task" : "Add task"}>
-          <Field label="Task name"><input value={taskModal.name} onChange={(e) => setTaskModal((m) => ({ ...m, name: e.target.value }))} placeholder="e.g. Register for fall classes" /></Field>
-          <Field label="Due date"><input value={taskModal.due} onChange={(e) => setTaskModal((m) => ({ ...m, due: e.target.value }))} placeholder="e.g. June 15" /></Field>
+          <Field label="Task name">
+            <input
+              value={taskModal.name}
+              onChange={(e) => setTaskModal((m) => ({ ...m, name: e.target.value }))}
+              placeholder="e.g. Register for fall classes"
+            />
+          </Field>
+          <Field label="Due date">
+            <input
+              value={taskModal.due}
+              onChange={(e) => setTaskModal((m) => ({ ...m, due: e.target.value }))}
+              placeholder="e.g. June 15"
+            />
+          </Field>
           <Field label="Linked goal">
             <select value={taskModal.goal} onChange={(e) => setTaskModal((m) => ({ ...m, goal: e.target.value }))}>
               <option value="">none</option>
-              {goals.map((g) => <option key={g.id} value={g.name}>{g.name}</option>)}
+              {goals.map((g) => (
+                <option key={g.id} value={g.name}>
+                  {g.name}
+                </option>
+              ))}
             </select>
           </Field>
           <Field label="Importance">
             <div style={{ display: "flex", gap: 6 }}>
-              {[[1,"Low"],[2,"Medium"],[3,"Critical"]].map(([val, label]) => (
-                <button key={val} onClick={() => setTaskModal((m) => ({ ...m, imp: val }))} style={{ flex: 1, padding: "8px 6px", fontSize: 11, fontFamily: "monospace", border: `1px solid ${taskModal.imp === val ? "#8eaefb" : "rgba(255,255,255,0.09)"}`, borderRadius: 7, background: taskModal.imp === val ? "rgba(142,174,251,0.16)" : "none", color: taskModal.imp === val ? "#8eaefb" : "#706d68", cursor: "pointer" }}>{label}</button>
+              {[
+                [1, "Low"],
+                [2, "Medium"],
+                [3, "Critical"],
+              ].map(([val, label]) => (
+                <button
+                  key={val}
+                  onClick={() => setTaskModal((m) => ({ ...m, imp: val }))}
+                  style={{
+                    flex: 1,
+                    padding: "8px 6px",
+                    fontSize: 11,
+                    ...mono,
+                    border: `1px solid ${taskModal.imp === val ? "#8eaefb" : "rgba(255,255,255,0.09)"}`,
+                    borderRadius: 7,
+                    background: taskModal.imp === val ? "rgba(142,174,251,0.16)" : "none",
+                    color: taskModal.imp === val ? "#8eaefb" : "#706d68",
+                    cursor: "pointer",
+                  }}
+                >
+                  {label}
+                </button>
               ))}
             </div>
           </Field>
-          <ModalActions onCancel={() => setTaskModal(null)} onSave={() => {
-            if (!taskModal.name.trim()) return;
-            const t = { ...taskModal, id: taskModal.id || Date.now().toString() };
-            setTasks((prev) => taskModal.id ? prev.map((x) => x.id === t.id ? t : x) : [...prev, t]);
-            setTaskModal(null);
-          }} />
+          <ModalActions
+            onCancel={() => setTaskModal(null)}
+            onSave={() => {
+              const name = taskModal.name.trim();
+              if (!name) return;
+              if (!taskModal.id && tasks.some((t) => !t.done && norm(t.name) === norm(name))) {
+                toast("That task already exists");
+                setTaskModal(null);
+                return;
+              }
+              const t = { ...taskModal, name, id: taskModal.id || uid() };
+              setTasks((prev) => (taskModal.id ? prev.map((x) => (x.id === t.id ? t : x)) : [...prev, t]));
+              setTaskModal(null);
+            }}
+          />
         </Modal>
       )}
 
       {habitModal && (
         <Modal onClose={() => setHabitModal(null)} title={habitModal.id ? "Edit habit" : "Add habit"}>
-          <Field label="Habit name"><input value={habitModal.name} onChange={(e) => setHabitModal((m) => ({ ...m, name: e.target.value }))} placeholder="e.g. 200g protein" /></Field>
-          <Field label="Frequency"><input value={habitModal.freq} onChange={(e) => setHabitModal((m) => ({ ...m, freq: e.target.value }))} placeholder="e.g. daily, 3x per week, every 2 weeks, monthly" /></Field>
-          <Field label="Note (optional)"><input value={habitModal.note} onChange={(e) => setHabitModal((m) => ({ ...m, note: e.target.value }))} placeholder="e.g. spread across 4 meals" /></Field>
-          <ModalActions onCancel={() => setHabitModal(null)} onSave={() => {
-            if (!habitModal.name.trim()) return;
-            const h = { ...habitModal, id: habitModal.id || Date.now().toString(), streak: habitModal.streak || 0, history: habitModal.history || [0,0,0,0,0,0,0], tickedToday: habitModal.tickedToday || false };
-            setHabits((prev) => habitModal.id ? prev.map((x) => x.id === h.id ? h : x) : [...prev, h]);
-            setHabitModal(null);
-          }} />
+          <Field label="Habit name">
+            <input
+              value={habitModal.name}
+              onChange={(e) => setHabitModal((m) => ({ ...m, name: e.target.value }))}
+              placeholder="e.g. 200g protein"
+            />
+          </Field>
+          <Field label="Frequency">
+            <input
+              value={habitModal.freq}
+              onChange={(e) => setHabitModal((m) => ({ ...m, freq: e.target.value }))}
+              placeholder="daily / 3x per week / every other week"
+            />
+          </Field>
+          <Field label="Note (optional)">
+            <input
+              value={habitModal.note}
+              onChange={(e) => setHabitModal((m) => ({ ...m, note: e.target.value }))}
+              placeholder="e.g. spread across 4 meals"
+            />
+          </Field>
+          <ModalActions
+            onCancel={() => setHabitModal(null)}
+            onSave={() => {
+              const name = habitModal.name.trim();
+              if (!name) return;
+              if (!habitModal.id && habits.some((h) => norm(h.name) === norm(name))) {
+                toast("That habit already exists");
+                setHabitModal(null);
+                return;
+              }
+              const h = {
+                ...habitModal,
+                name,
+                id: habitModal.id || uid(),
+                streak: habitModal.streak || 0,
+                week: habitModal.week || [0, 0, 0, 0, 0, 0, 0],
+                tickedToday: habitModal.tickedToday || false,
+                lastTicked: habitModal.lastTicked || null,
+              };
+              setHabits((prev) => (habitModal.id ? prev.map((x) => (x.id === h.id ? h : x)) : [...prev, h]));
+              setHabitModal(null);
+            }}
+          />
         </Modal>
       )}
 
-      {rescheduleModal && (
-        <Modal onClose={() => setRescheduleModal(null)} title="What happened?">
-          <Field label="Why couldn't you do it?"><textarea value={rescheduleReason} onChange={(e) => setRescheduleReason(e.target.value)} placeholder="e.g. Meeting ran long, ran out of energy, came up unexpectedly..." /></Field>
-          <Field label="Move to when? (optional)"><input value={rescheduleTime} onChange={(e) => setRescheduleTime(e.target.value)} placeholder="e.g. this evening, tomorrow morning" /></Field>
-          <div style={{ fontSize: 11, color: "#706d68", fontFamily: "monospace", marginTop: 4 }}>Claude will remember this and adjust future plans accordingly.</div>
-          <ModalActions onCancel={() => setRescheduleModal(null)} onSave={confirmReschedule} saveLabel="Got it" />
+      {rescheduleId && (
+        <Modal onClose={() => setRescheduleId(null)} title="What happened?">
+          <Field label="Why couldn't you do it?">
+            <textarea
+              value={rescheduleReason}
+              onChange={(e) => setRescheduleReason(e.target.value)}
+              placeholder="Ran long, low energy, something came up..."
+            />
+          </Field>
+          <Field label="Move it to when? (optional)">
+            <input
+              value={rescheduleTime}
+              onChange={(e) => setRescheduleTime(e.target.value)}
+              placeholder="tonight / tomorrow morning"
+            />
+          </Field>
+          <div style={{ fontSize: 11, color: "#706d68", ...mono, marginTop: 4 }}>
+            Claude remembers this and adjusts future plans.
+          </div>
+          <ModalActions onCancel={() => setRescheduleId(null)} onSave={confirmReschedule} saveLabel="Got it" />
         </Modal>
       )}
     </div>
   );
 }
 
-function PlanBlock({ block, onToggle, onSkip, onReschedule, onStart, skipCount = 0 }) {
+function PlanBlock({ block, onToggle, onSkip, onReschedule, onStart, skipCount }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [skipInput, setSkipInput] = useState("");
-  const [showSkipInput, setShowSkipInput] = useState(false);
-  const isSkipped = block.status === "skipped";
-  const isRescheduled = block.status === "rescheduled";
+  const [showSkip, setShowSkip] = useState(false);
+  const skipped = block.status === "skipped";
+  const moved = block.status === "rescheduled";
+  const mono = { fontFamily: "monospace" };
 
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", borderBottom: "1px solid rgba(255,255,255,0.09)", opacity: block.done || isSkipped ? 0.32 : 1, position: "relative" }}>
-      <div style={{ width: 48, flexShrink: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 18 }}>
-        <div onClick={() => { if (!isSkipped) { onStart(block.id); onToggle(block.id); }}} style={{ width: 18, height: 18, border: `1.5px solid ${block.done ? "#81c995" : "rgba(255,255,255,0.22)"}`, borderRadius: "50%", cursor: isSkipped ? "default" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: block.done ? "#81c995" : "none", flexShrink: 0 }}>
-          {block.done && <div style={{ width: 8, height: 5, borderLeft: "2px solid #0e1a11", borderBottom: "2px solid #0e1a11", transform: "rotate(-45deg) translateY(-1px)" }} />}
+    <div
+      style={{
+        display: "flex",
+        alignItems: "flex-start",
+        borderBottom: "1px solid rgba(255,255,255,0.09)",
+        opacity: block.done || skipped ? 0.32 : 1,
+      }}
+    >
+      <div style={{ width: 48, flexShrink: 0, display: "flex", justifyContent: "center", paddingTop: 18 }}>
+        <div
+          onClick={() => {
+            if (skipped) return;
+            onStart(block.id);
+            onToggle(block.id);
+          }}
+          style={{
+            width: 18,
+            height: 18,
+            border: `1.5px solid ${block.done ? "#81c995" : "rgba(255,255,255,0.22)"}`,
+            borderRadius: "50%",
+            cursor: skipped ? "default" : "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: block.done ? "#81c995" : "none",
+          }}
+        >
+          {block.done && (
+            <div
+              style={{
+                width: 8,
+                height: 5,
+                borderLeft: "2px solid #0e1a11",
+                borderBottom: "2px solid #0e1a11",
+                transform: "rotate(-45deg) translateY(-1px)",
+              }}
+            />
+          )}
         </div>
       </div>
       <div style={{ flex: 1, padding: "14px 8px 14px 0" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-          <div style={{ fontSize: 11, fontFamily: "monospace", color: "#8eaefb" }}>{block.time}{block.duration ? ` ${block.duration}` : ""}{isRescheduled && block.newTime ? " → " + block.newTime : ""}</div>
-          <ImpDots imp={block.imp || 2} />
+          <div style={{ fontSize: 11, ...mono, color: "#8eaefb" }}>
+            {block.time}
+            {block.duration ? " \u00b7 " + block.duration : ""}
+            {moved && block.newTime ? " \u2192 " + block.newTime : ""}
+          </div>
+          <ImpDots imp={block.imp} />
         </div>
-        <div style={{ fontSize: 14, fontWeight: 500, color: block.done || isSkipped ? "#706d68" : "#f2efe9", textDecoration: block.done || isSkipped ? "line-through" : "none", marginBottom: 3 }}>{block.title}</div>
+        <div
+          style={{
+            fontSize: 14,
+            fontWeight: 500,
+            color: block.done || skipped ? "#706d68" : "#f2efe9",
+            textDecoration: block.done || skipped ? "line-through" : "none",
+            marginBottom: 3,
+          }}
+        >
+          {block.title}
+        </div>
         <div style={{ fontSize: 12.5, color: "#b0aca6", lineHeight: 1.6 }}>{block.desc}</div>
-        {showSkipInput && (
+
+        {showSkip && (
           <div style={{ marginTop: 8, display: "flex", gap: 6 }}>
-            <input value={skipInput} onChange={(e) => setSkipInput(e.target.value)} placeholder="What came up? (optional)" style={{ flex: 1, background: "#2a2a34", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 6, padding: "6px 10px", fontSize: 12, color: "#f2efe9", outline: "none" }} />
-            <button onClick={() => { onSkip(block.id, skipInput); setShowSkipInput(false); }} style={{ background: "#32323e", border: "none", borderRadius: 6, padding: "6px 10px", fontSize: 11, color: "#b0aca6", cursor: "pointer" }}>Skip</button>
+            <input
+              value={skipInput}
+              onChange={(e) => setSkipInput(e.target.value)}
+              placeholder="What came up? (optional)"
+              style={{
+                flex: 1,
+                background: "#2a2a34",
+                border: "1px solid rgba(255,255,255,0.09)",
+                borderRadius: 6,
+                padding: "6px 10px",
+                fontSize: 16,
+                color: "#f2efe9",
+                outline: "none",
+              }}
+            />
+            <button
+              onClick={() => {
+                onSkip(block.id, skipInput.trim());
+                setShowSkip(false);
+              }}
+              style={{
+                background: "#32323e",
+                border: "none",
+                borderRadius: 6,
+                padding: "6px 12px",
+                fontSize: 11,
+                color: "#b0aca6",
+                cursor: "pointer",
+              }}
+            >
+              Skip
+            </button>
           </div>
         )}
+
         <div style={{ display: "flex", gap: 5, marginTop: 6, flexWrap: "wrap" }}>
-          {block.done && <span style={{ fontSize: 10, fontFamily: "monospace", color: "#81c995", background: "rgba(129,201,149,0.12)", padding: "2px 8px", borderRadius: 99 }}>completed</span>}
-          {isSkipped && <span style={{ fontSize: 10, fontFamily: "monospace", color: "#706d68", background: "#32323e", padding: "2px 8px", borderRadius: 99 }}>skipped{block.skipReason ? ` — ${block.skipReason}` : ""}</span>}
-          {isRescheduled && !block.done && <span style={{ fontSize: 10, fontFamily: "monospace", color: "#f0c060", background: "rgba(240,192,96,0.12)", padding: "2px 8px", borderRadius: 99 }}>rescheduled</span>}
-          {skipCount >= 2 && !block.done && !isSkipped && <span style={{ fontSize: 10, fontFamily: "monospace", color: "#f28b82", background: "rgba(242,139,130,0.12)", padding: "2px 8px", borderRadius: 99 }}>skipped {skipCount}x recently</span>}
+          {block.done && (
+            <span
+              style={{
+                fontSize: 10,
+                ...mono,
+                color: "#81c995",
+                background: "rgba(129,201,149,0.12)",
+                padding: "2px 8px",
+                borderRadius: 99,
+              }}
+            >
+              completed
+            </span>
+          )}
+          {skipped && (
+            <span
+              style={{
+                fontSize: 10,
+                ...mono,
+                color: "#706d68",
+                background: "#32323e",
+                padding: "2px 8px",
+                borderRadius: 99,
+              }}
+            >
+              skipped{block.skipReason ? " - " + block.skipReason : ""}
+            </span>
+          )}
+          {moved && !block.done && (
+            <span
+              style={{
+                fontSize: 10,
+                ...mono,
+                color: "#f0c060",
+                background: "rgba(240,192,96,0.12)",
+                padding: "2px 8px",
+                borderRadius: 99,
+              }}
+            >
+              moved
+            </span>
+          )}
+          {skipCount >= 2 && !block.done && !skipped && (
+            <span
+              style={{
+                fontSize: 10,
+                ...mono,
+                color: "#f28b82",
+                background: "rgba(242,139,130,0.12)",
+                padding: "2px 8px",
+                borderRadius: 99,
+              }}
+            >
+              skipped {skipCount}x recently
+            </span>
+          )}
         </div>
       </div>
-      {!block.done && !isSkipped && (
-        <div style={{ width: 34, flexShrink: 0, display: "flex", alignItems: "flex-start", justifyContent: "center", paddingTop: 12, position: "relative" }}>
-          <button onClick={() => setMenuOpen((o) => !o)} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 15, padding: 4, borderRadius: 4 }}>...</button>
+
+      {!block.done && !skipped && (
+        <div style={{ width: 34, flexShrink: 0, display: "flex", justifyContent: "center", paddingTop: 12, position: "relative" }}>
+          <button
+            onClick={() => setMenuOpen((o) => !o)}
+            style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 15, padding: 4 }}
+          >
+            &hellip;
+          </button>
           {menuOpen && (
-            <div style={{ position: "absolute", right: 6, top: 32, background: "#2a2a34", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 7, zIndex: 50, minWidth: 150, overflow: "hidden", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
-              <button onClick={() => { setShowSkipInput(true); setMenuOpen(false); }} style={{ padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>Skip</button>
-              <button onClick={() => { onReschedule(block.id); setMenuOpen(false); }} style={{ padding: "9px 13px", fontSize: 12, cursor: "pointer", color: "#b0aca6", background: "none", border: "none", width: "100%", textAlign: "left" }}>Reschedule</button>
+            <div
+              style={{
+                position: "absolute",
+                right: 6,
+                top: 32,
+                background: "#2a2a34",
+                border: "1px solid rgba(255,255,255,0.16)",
+                borderRadius: 7,
+                zIndex: 50,
+                minWidth: 140,
+                overflow: "hidden",
+              }}
+            >
+              <button
+                onClick={() => {
+                  setShowSkip(true);
+                  setMenuOpen(false);
+                }}
+                style={{
+                  padding: "9px 13px",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  color: "#b0aca6",
+                  background: "none",
+                  border: "none",
+                  width: "100%",
+                  textAlign: "left",
+                }}
+              >
+                Skip
+              </button>
+              <button
+                onClick={() => {
+                  onReschedule(block.id);
+                  setMenuOpen(false);
+                }}
+                style={{
+                  padding: "9px 13px",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  color: "#b0aca6",
+                  background: "none",
+                  border: "none",
+                  width: "100%",
+                  textAlign: "left",
+                }}
+              >
+                Move
+              </button>
             </div>
           )}
         </div>
@@ -1111,24 +2350,75 @@ function PlanBlock({ block, onToggle, onSkip, onReschedule, onStart, skipCount =
   );
 }
 
-function TaskCard({ task, goals, onToggle, onEdit, onDelete }) {
+function TaskCard({ task, onToggle, onEdit, onDelete }) {
+  const mono = { fontFamily: "monospace" };
   return (
-    <div onClick={() => onEdit(task)} style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 12, padding: "13px 15px", marginBottom: 8, display: "flex", alignItems: "flex-start", gap: 11, opacity: task.done ? 0.38 : 1, cursor: "pointer" }}>
-      <div onClick={(e) => { e.stopPropagation(); onToggle(task.id); }} style={{ width: 17, height: 17, border: `1.5px solid ${task.done ? "#8eaefb" : "rgba(255,255,255,0.22)"}`, borderRadius: 5, flexShrink: 0, marginTop: 1, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", background: task.done ? "#8eaefb" : "none" }}>
-        {task.done && <div style={{ width: 8, height: 5, borderLeft: "2px solid #0e0f1a", borderBottom: "2px solid #0e0f1a", transform: "rotate(-45deg) translateY(-1px)" }} />}
+    <div
+      onClick={() => onEdit(task)}
+      style={{
+        background: "#22222a",
+        border: "1px solid rgba(255,255,255,0.09)",
+        borderRadius: 12,
+        padding: "13px 15px",
+        marginBottom: 8,
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 11,
+        opacity: task.done ? 0.38 : 1,
+        cursor: "pointer",
+      }}
+    >
+      <div
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggle(task.id);
+        }}
+        style={{
+          width: 17,
+          height: 17,
+          border: `1.5px solid ${task.done ? "#8eaefb" : "rgba(255,255,255,0.22)"}`,
+          borderRadius: 5,
+          flexShrink: 0,
+          marginTop: 1,
+          cursor: "pointer",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: task.done ? "#8eaefb" : "none",
+        }}
+      >
+        {task.done && (
+          <div
+            style={{
+              width: 8,
+              height: 5,
+              borderLeft: "2px solid #0e0f1a",
+              borderBottom: "2px solid #0e0f1a",
+              transform: "rotate(-45deg) translateY(-1px)",
+            }}
+          />
+        )}
       </div>
       <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 13, color: "#f2efe9", textDecoration: task.done ? "line-through" : "none" }}>{task.name}</div>
+        <div style={{ fontSize: 13, textDecoration: task.done ? "line-through" : "none" }}>{task.name}</div>
         {(task.due || task.goal) && (
           <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
-            {task.due && <span style={{ fontSize: 11, fontFamily: "monospace", color: "#706d68" }}>Due: {task.due}</span>}
-            {task.goal && <span style={{ fontSize: 11, fontFamily: "monospace", color: "#706d68" }}>↳ {task.goal}</span>}
+            {task.due && <span style={{ fontSize: 11, ...mono, color: "#706d68" }}>Due: {task.due}</span>}
+            {task.goal && <span style={{ fontSize: 11, ...mono, color: "#706d68" }}>&rarr; {task.goal}</span>}
           </div>
         )}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <ImpDots imp={task.imp || 1} />
-        <button onClick={(e) => { e.stopPropagation(); onDelete(task.id); }} style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}>x</button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(task.id);
+          }}
+          style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}
+        >
+          &times;
+        </button>
       </div>
     </div>
   );
@@ -1136,9 +2426,33 @@ function TaskCard({ task, goals, onToggle, onEdit, onDelete }) {
 
 function Modal({ children, onClose, title }) {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, backdropFilter: "blur(2px)", padding: "0 16px" }} onClick={onClose}>
-      <div style={{ background: "#22222a", border: "1px solid rgba(255,255,255,0.16)", borderRadius: 12, padding: 24, width: "100%", maxWidth: 420, maxHeight: "85vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
-        <div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontStyle: "italic", color: "#f2efe9", marginBottom: 18 }}>{title}</div>
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.55)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 200,
+        padding: "0 16px",
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: "#22222a",
+          border: "1px solid rgba(255,255,255,0.16)",
+          borderRadius: 12,
+          padding: 24,
+          width: "100%",
+          maxWidth: 420,
+          maxHeight: "85vh",
+          overflowY: "auto",
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontStyle: "italic", marginBottom: 18 }}>{title}</div>
         {children}
       </div>
     </div>
@@ -1148,7 +2462,18 @@ function Modal({ children, onClose, title }) {
 function Field({ label, children }) {
   return (
     <div style={{ marginBottom: 13 }}>
-      <div style={{ fontSize: 10, fontFamily: "monospace", color: "#706d68", marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.08em" }}>{label}</div>
+      <div
+        style={{
+          fontSize: 10,
+          fontFamily: "monospace",
+          color: "#706d68",
+          marginBottom: 5,
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+        }}
+      >
+        {label}
+      </div>
       {children}
     </div>
   );
@@ -1157,8 +2482,36 @@ function Field({ label, children }) {
 function ModalActions({ onCancel, onSave, saveLabel = "Save" }) {
   return (
     <div style={{ display: "flex", gap: 8, marginTop: 20 }}>
-      <button onClick={onCancel} style={{ padding: "10px 16px", fontSize: 13, background: "none", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 7, color: "#b0aca6", cursor: "pointer" }}>Cancel</button>
-      <button onClick={onSave} style={{ flex: 1, padding: 10, fontSize: 13, fontWeight: 500, background: "#8eaefb", color: "#0e0f1a", border: "none", borderRadius: 7, cursor: "pointer" }}>{saveLabel}</button>
+      <button
+        onClick={onCancel}
+        style={{
+          padding: "10px 16px",
+          fontSize: 13,
+          background: "none",
+          border: "1px solid rgba(255,255,255,0.09)",
+          borderRadius: 7,
+          color: "#b0aca6",
+          cursor: "pointer",
+        }}
+      >
+        Cancel
+      </button>
+      <button
+        onClick={onSave}
+        style={{
+          flex: 1,
+          padding: 10,
+          fontSize: 13,
+          fontWeight: 500,
+          background: "#8eaefb",
+          color: "#0e0f1a",
+          border: "none",
+          borderRadius: 7,
+          cursor: "pointer",
+        }}
+      >
+        {saveLabel}
+      </button>
     </div>
   );
 }
