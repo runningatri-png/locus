@@ -144,10 +144,10 @@ ${taskCtx}
 HABITS (complete and only list):
 ${habitCtx}
 
-SKIP PATTERNS:
+SKIP PATTERNS (historical stats only - never schedule something because it appears here):
 ${patterns}
 
-HOW LONG THINGS ACTUALLY TAKE:
+HOW LONG THINGS ACTUALLY TAKE (historical stats only - never schedule something because it appears here):
 ${tsCtx}
 
 LIFE CONTEXT NOTES:
@@ -158,6 +158,7 @@ ${ideas.map((i) => `- [id:${i.id}] ${i.t}`).join("\n") || "None"}`;
 }
 
 const PLAN_RULES = `PLAN RULES:
+- Every block must come from the GOALS, PENDING TASKS, or HABITS lists above, or from something the user explicitly asked for. Never schedule anything that appears only in skip patterns, completion time data, or context notes - those are history, not a to-do list. If a name is not in the current lists, it does not exist anymore.
 - No clock times unless the user explicitly gave one. Use a phase of day for "time": Morning, Late morning, Midday, Afternoon, Evening, Night.
 - Every block needs an approximate duration string like "~45 min", "~1 hr", "~2 hr".
 - Order blocks in the sequence they should happen.
@@ -519,6 +520,42 @@ export default function App() {
           if (a.text) noteContext(a.text);
           break;
         }
+        case "add_block": {
+          if (!a.title) break;
+          setTodayPlan((prev) => {
+            if (prev.some((b) => norm(b.title) === norm(a.title) && !b.done && b.status !== "skipped")) return prev;
+            return [
+              ...prev,
+              {
+                time: a.time || "Anytime",
+                title: a.title,
+                desc: a.desc || "",
+                imp: Math.min(3, Math.max(1, Number(a.imp) || 2)),
+                duration: a.duration || "",
+                id: uid(),
+                done: false,
+                status: "pending",
+                startTime: null,
+              },
+            ];
+          });
+          toast("Added to today: " + a.title);
+          break;
+        }
+        case "remove_block": {
+          if (!a.title) break;
+          setTodayPlan((prev) => prev.filter((b) => b.done || !norm(b.title).includes(norm(a.title))));
+          toast("Removed from today");
+          break;
+        }
+        case "edit_block": {
+          if (!a.title) break;
+          setTodayPlan((prev) =>
+            prev.map((b) => (norm(b.title).includes(norm(a.title)) ? { ...b, ...(a.updates || {}) } : b))
+          );
+          toast("Updated today's plan");
+          break;
+        }
         case "clear_completed_tasks": {
           ts = ts.filter((t) => !t.done);
           toast("Cleared completed tasks");
@@ -722,21 +759,32 @@ ACTIONS:
 {"type":"add_idea","text"}
 {"type":"delete_idea","text"}
 {"type":"add_context","text"}
+{"type":"add_block","time":"Morning|Late morning|Midday|Afternoon|Evening|Night","title","desc","duration":"~30 min","imp":1|2|3}
+{"type":"remove_block","title"}
+{"type":"edit_block","title","updates":{"time":"...","desc":"...","duration":"..."}}
 {"type":"clear_completed_tasks"}
 {"type":"generate_plan"}
 {"type":"generate_tomorrow_plan"}
 
 HARD RULES:
-1. If the user says anything that changes how their day will actually go - ran out of time, did half of something, something came up, feels drained, wants to shuffle things, finished early - you MUST include {"type":"generate_plan"}. Acknowledging without regenerating is a failure.
-2. Never add a goal, task, habit, or idea that already exists in the lists above. Check first.
-3. Only reference habits that exist in the HABITS list. Never invent one.
+1. The plan must always reflect reality, but change it with the smallest action that works:
+   - User wants to add one thing to today: use add_block. Do NOT regenerate.
+   - User wants to drop or tweak one thing: use remove_block or edit_block. Do NOT regenerate.
+   - Only use generate_plan when most of the day needs restructuring (schedule blown up, everything shifting). Regenerating wipes the ordering the user is mid-way through, so it is a last resort.
+   - Acknowledging a change without emitting any action is a failure.
+2. Never add a goal, task, habit, idea, or plan block that already exists in the lists above. Check first.
+3. Only reference habits that exist in the HABITS list. Never invent one. Never schedule anything whose name only appears in skip patterns or completion time stats - those are history, not current commitments.
 4. Never emit an action with an empty name or text field.
 5. When the user shares stress, mood, or life circumstances, capture it with add_context so future plans account for it.
 6. Be direct and specific. Reference their real goals by name. Confirm exactly what you changed.
 
-Example:
-Split the workout - second half is on tonight's plan now.
-[{"type":"add_context","text":"Only got through half the workout this morning, doing the rest tonight"},{"type":"generate_plan"}]`;
+Example (small addition - no regenerate):
+Added a call with Connor to this evening.
+[{"type":"add_block","time":"Evening","title":"Call with Connor","desc":"Prep two questions about the Salesforce SE role beforehand.","duration":"~30 min","imp":2}]
+
+Example (day blown up - regenerate):
+Rough one. Rebuilt the rest of your day around the afternoon you lost.
+[{"type":"add_context","text":"Lost the afternoon to an emergency, day restructured"},{"type":"generate_plan"}]`;
 
     try {
       const reply = await callClaude(system, nextHistory, wantsSearch);
