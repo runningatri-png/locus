@@ -779,8 +779,8 @@ HARD RULES:
 6. Be direct and specific. Reference their real goals by name. Confirm exactly what you changed.
 
 Example (small addition - no regenerate):
-Added a call with Connor to this evening.
-[{"type":"add_block","time":"Evening","title":"Call with Connor","desc":"Prep two questions about the Salesforce SE role beforehand.","duration":"~30 min","imp":2}]
+Added a call with Alex to this evening.
+[{"type":"add_block","time":"Evening","title":"Call with Alex","desc":"Prep your two main questions beforehand.","duration":"~30 min","imp":2}]
 
 Example (day blown up - regenerate):
 Rough one. Rebuilt the rest of your day around the afternoon you lost.
@@ -1091,6 +1091,58 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
           <div>{now.toLocaleDateString("en-US", { weekday: "long" })}</div>
           <div style={{ marginTop: 2, color: "#b0aca6" }}>
             {now.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
+          </div>
+          <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
+            <button
+              onClick={() => {
+                if (
+                  window.confirm(
+                    "Clear learned stats, context notes, history, and archived plans? Your goals, tasks, habits, and ideas stay."
+                  )
+                ) {
+                  setSkipPatterns({});
+                  setTimestamps({});
+                  setContext([]);
+                  setHistory([]);
+                  setPlanArchive({});
+                  toast("Stats & history cleared");
+                }
+              }}
+              style={{
+                flex: 1,
+                background: "none",
+                border: "1px solid rgba(255,255,255,0.09)",
+                borderRadius: 6,
+                padding: "5px 6px",
+                fontSize: 9,
+                color: "#706d68",
+                cursor: "pointer",
+                ...mono,
+              }}
+            >
+              clear stats
+            </button>
+            <button
+              onClick={() => {
+                if (window.confirm("Erase ALL data and start completely fresh? This cannot be undone.")) {
+                  Object.values(KEYS).forEach((k) => localStorage.removeItem(k));
+                  window.location.reload();
+                }
+              }}
+              style={{
+                flex: 1,
+                background: "none",
+                border: "1px solid rgba(242,139,130,0.25)",
+                borderRadius: 6,
+                padding: "5px 6px",
+                fontSize: 9,
+                color: "#f28b82",
+                cursor: "pointer",
+                ...mono,
+              }}
+            >
+              reset all
+            </button>
           </div>
         </div>
       </div>
@@ -1949,7 +2001,7 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
             <input
               value={goalModal.name}
               onChange={(e) => setGoalModal((m) => ({ ...m, name: e.target.value }))}
-              placeholder="e.g. Land a fintech SE role"
+              placeholder="e.g. Run a half marathon"
             />
           </Field>
           <Field label="Life area">
@@ -1970,7 +2022,7 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
             <input
               value={goalModal.deadline}
               onChange={(e) => setGoalModal((m) => ({ ...m, deadline: e.target.value }))}
-              placeholder="e.g. Spring 2027"
+              placeholder="e.g. by December"
             />
           </Field>
           <Field label="Priority">
@@ -2095,7 +2147,7 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
             <input
               value={habitModal.name}
               onChange={(e) => setHabitModal((m) => ({ ...m, name: e.target.value }))}
-              placeholder="e.g. 200g protein"
+              placeholder="e.g. Read 20 minutes"
             />
           </Field>
           <Field label="Frequency">
@@ -2109,7 +2161,7 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
             <input
               value={habitModal.note}
               onChange={(e) => setHabitModal((m) => ({ ...m, note: e.target.value }))}
-              placeholder="e.g. spread across 4 meals"
+              placeholder="e.g. mornings work best"
             />
           </Field>
           <ModalActions
