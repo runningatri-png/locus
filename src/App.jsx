@@ -173,6 +173,18 @@ const PLAN_RULES = `PLAN RULES:
 Format: [{"time":"Morning","title":"...","desc":"...","imp":3,"duration":"~90 min"}]
 imp is 1, 2, or 3.`;
 
+// Groups consecutive blocks that share a phase of day, without reordering them.
+function groupByPhase(blocks) {
+  const groups = [];
+  for (const b of blocks) {
+    const label = b.time || "Anytime";
+    const last = groups[groups.length - 1];
+    if (last && norm(last.label) === norm(label)) last.blocks.push(b);
+    else groups.push({ label, blocks: [b] });
+  }
+  return groups;
+}
+
 const IMP_COLORS = ["", "#706d68", "#8eaefb", "#f28b82"];
 
 function ImpDots({ imp }) {
@@ -220,6 +232,7 @@ export default function App() {
   const [tmrChat, setTmrChat] = useState([]);
   const [tmrInput, setTmrInput] = useState("");
   const [tmrLoading, setTmrLoading] = useState(false);
+  const [tmrView, setTmrView] = useState("ideas");
 
   const [planLoading, setPlanLoading] = useState(false);
   const [sugLoading, setSugLoading] = useState(false);
@@ -574,44 +587,88 @@ export default function App() {
     return { gs, ts, hs, is, wantPlan, wantTomorrow };
   }
 
+  // Today's Generate lays out habits and nothing else. Real planning happens in the
+  // Tomorrow tab or through Chat; this never invents goals, tasks, or filler.
   async function generateToday(snap) {
     const src = snap || { gs: goals, ts: tasks, hs: habits, is: ideas };
-    setPlanLoading(true);
-    const ctx = buildContext({
-      goals: src.gs,
-      tasks: src.ts,
-      habits: src.hs,
-      ideas: src.is,
-      skipPatterns,
-      timestamps,
-      context,
-    });
-    const keep = todayPlan.filter((b) => b.done || b.status === "skipped");
-    const keepNote = keep.length
-      ? `\n\nALREADY DONE OR SKIPPED TODAY (never repeat these):\n${keep
-          .map((b) => `- ${b.title} (${b.done ? "done" : "skipped"})`)
-          .join("\n")}\n\nPlan only the remaining part of the day.`
-      : "";
-    try {
-      const text = await callClaude(`You build one day's plan for Locus.\n\n${ctx}${keepNote}\n\n${PLAN_RULES}`, [
-        { role: "user", content: "Build my plan for today." },
-      ]);
-      const blocks = extractJSONArray(text).map((b) => ({
-        time: b.time || "Anytime",
-        title: b.title || "Untitled",
-        desc: b.desc || "",
-        imp: Math.min(3, Math.max(1, Number(b.imp) || 2)),
-        duration: b.duration || "",
-        id: uid(),
-        done: false,
-        status: "pending",
-        startTime: null,
-      }));
-      setTodayPlan([...keep, ...blocks]);
-      toast("Plan generated");
-    } catch {
-      toast("Couldn't generate plan");
+    const allHabits = src.hs || [];
+
+    if (!allHabits.length) {
+      toast("No habits yet - add some in Habits");
+      return;
     }
+
+    const onPlan = new Set(todayPlan.map((b) => norm(b.title)));
+    const pool = allHabits.filter((h) => !h.tickedToday && !onPlan.has(norm(h.name)));
+
+    if (!pool.length) {
+      toast("Every habit is already done or on the plan");
+      return;
+    }
+
+    const habitBlock = (h, time, desc, duration, imp) => ({
+      time: time || "Anytime",
+      title: h.name,
+      desc: desc || h.note || "",
+      imp: Math.min(3, Math.max(1, Number(imp) || 2)),
+      duration: duration || (timestamps[h.name] ? "~" + timestamps[h.name].avg + " min" : ""),
+      id: uid(),
+      done: false,
+      status: "pending",
+      startTime: null,
+      habitId: h.id,
+    });
+
+    setPlanLoading(true);
+
+    const habitList = pool
+      .map(
+        (h) =>
+          `- ${h.name}${h.freq ? ` (${h.freq})` : ""}${h.note ? ` - ${h.note}` : ""}${
+            timestamps[h.name] ? `, usually takes about ${timestamps[h.name].avg} min` : ""
+          }`
+      )
+      .join("\n");
+
+    const system = `You lay out the user's habits for today in Locus. That is the whole job.
+
+HABITS TO PLACE (complete and only list):
+${habitList}
+
+RULES:
+- Output exactly one block per habit above - no more, no fewer.
+- Each block's "title" must be the habit name copied EXACTLY as written above, character for character.
+- Add NOTHING else. No goals, no tasks, no errands, no meals, no flex or buffer blocks, no filler of any kind. If it is not in the list above, it does not go in the plan.
+- No clock times. "time" is a phase of day: Morning, Late morning, Midday, Afternoon, Evening, or Night. Pick the phase that suits each habit.
+- Order the blocks in the sequence they should happen across the day.
+- Give each block an approximate duration like "~20 min" or "~1 hr". Use the stated typical time when one is given.
+- "desc" is one short, specific line about doing that habit today. Never generic filler.
+- Respond with ONLY a JSON array. No prose, no markdown fences.
+Format: [{"time":"Morning","title":"...","desc":"...","imp":2,"duration":"~20 min"}]
+imp is 1, 2, or 3.`;
+
+    let blocks = [];
+    try {
+      const raw = extractJSONArray(
+        await callClaude(system, [{ role: "user", content: "Lay out my habits for today." }])
+      );
+      const used = new Set();
+      // Hard filter: a block survives only if its title matches a real habit in the pool.
+      for (const b of Array.isArray(raw) ? raw : []) {
+        const h = pool.find((x) => !used.has(x.id) && norm(x.name) === norm(b && b.title));
+        if (!h) continue;
+        used.add(h.id);
+        blocks.push(habitBlock(h, b.time, b.desc, b.duration, b.imp));
+      }
+      // Any habit it dropped still gets a plain block, so nothing goes missing.
+      for (const h of pool) if (!used.has(h.id)) blocks.push(habitBlock(h));
+      toast(`Added ${blocks.length} habit block${blocks.length === 1 ? "" : "s"}`);
+    } catch {
+      blocks = pool.map((h) => habitBlock(h));
+      toast("Couldn't reach Claude - added habits plainly");
+    }
+
+    setTodayPlan((prev) => [...prev, ...blocks]);
     setPlanLoading(false);
   }
 
@@ -763,14 +820,15 @@ ACTIONS:
 {"type":"remove_block","title"}
 {"type":"edit_block","title","updates":{"time":"...","desc":"...","duration":"..."}}
 {"type":"clear_completed_tasks"}
-{"type":"generate_plan"}
+{"type":"generate_plan"}  <- lays out ONLY the user's existing habits on today, appended to the current plan. It never builds a full day and never adds goals or tasks.
 {"type":"generate_tomorrow_plan"}
 
 HARD RULES:
 1. The plan must always reflect reality, but change it with the smallest action that works:
    - User wants to add one thing to today: use add_block. Do NOT regenerate.
    - User wants to drop or tweak one thing: use remove_block or edit_block. Do NOT regenerate.
-   - Only use generate_plan when most of the day needs restructuring (schedule blown up, everything shifting). Regenerating wipes the ordering the user is mid-way through, so it is a last resort.
+   - generate_plan does NOT build a day. It only lays out the user's existing habits. Use it when they ask for their habits, and never as a way to restructure the day.
+   - When the day is blown up, fix it with one remove_block or edit_block per change. There is no action that rebuilds today for you.
    - Acknowledging a change without emitting any action is a failure.
 2. Never add a goal, task, habit, idea, or plan block that already exists in the lists above. Check first.
 3. Only reference habits that exist in the HABITS list. Never invent one. Never schedule anything whose name only appears in skip patterns or completion time stats - those are history, not current commitments.
@@ -782,9 +840,9 @@ Example (small addition - no regenerate):
 Added a call with Alex to this evening.
 [{"type":"add_block","time":"Evening","title":"Call with Alex","desc":"Prep your two main questions beforehand.","duration":"~30 min","imp":2}]
 
-Example (day blown up - regenerate):
-Rough one. Rebuilt the rest of your day around the afternoon you lost.
-[{"type":"add_context","text":"Lost the afternoon to an emergency, day restructured"},{"type":"generate_plan"}]`;
+Example (day blown up - fix it piece by piece, never regenerate):
+Rough one. Dropped the deep work block and moved the call to tonight.
+[{"type":"add_context","text":"Lost the afternoon to an emergency, day restructured"},{"type":"remove_block","title":"Deep work"},{"type":"edit_block","title":"Call with Alex","updates":{"time":"Evening"}}]`;
 
     try {
       const reply = await callClaude(system, nextHistory, wantsSearch);
@@ -819,6 +877,17 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
     setChatLoading(false);
   }
 
+  // One build path for both the Build button and typing "generate" in the box.
+  // Only the user's own messages are sent through - not Locus's replies.
+  async function buildTomorrow(chat) {
+    const notes = (chat || tmrChat)
+      .filter((m) => m.role === "user")
+      .map((m) => m.content)
+      .join(". ");
+    await generateTomorrow(notes, null);
+    setTmrView("plan");
+  }
+
   async function sendTomorrowChat() {
     const msg = tmrInput.trim();
     if (!msg || tmrLoading) return;
@@ -828,13 +897,13 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
     setTmrLoading(true);
     const wantsGenerate = /\b(generate|build|make|create|do it|go ahead|ready|that's it)\b/i.test(msg);
     if (wantsGenerate) {
-      await generateTomorrow(next.map((m) => m.content).join(". "), null);
+      await buildTomorrow(next);
       setTmrChat([
         ...next,
         { role: "assistant", content: "Built it. It becomes your Today plan automatically in the morning." },
       ]);
     } else {
-      setTmrChat([...next, { role: "assistant", content: 'Got it. Anything else? Say "generate" when ready.' }]);
+      setTmrChat([...next, { role: "assistant", content: "Got it. Anything else? Hit Build when you're ready." }]);
     }
     setTmrLoading(false);
   }
@@ -921,6 +990,16 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
     fontSize: 12,
     fontWeight: 500,
     cursor: "pointer",
+  };
+  const ghostBtn = {
+    background: "none",
+    border: "1px solid rgba(255,255,255,0.09)",
+    borderRadius: 6,
+    padding: "4px 11px",
+    fontSize: 11,
+    color: "#706d68",
+    cursor: "pointer",
+    ...mono,
   };
   const inputStyle = {
     flex: 1,
@@ -1186,7 +1265,7 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
                   disabled={planLoading}
                   style={{ ...primaryBtn, opacity: planLoading ? 0.6 : 1 }}
                 >
-                  {planLoading ? "..." : todayPlan.length ? "Regenerate" : "Generate"}
+                  {planLoading ? "..." : "Add habits"}
                 </button>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
@@ -1208,8 +1287,19 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
             </div>
             <div style={{ flex: 1, overflowY: "auto" }}>
               {!todayPlan.length && (
-                <div style={{ padding: "48px 20px", color: "#706d68", ...mono, fontSize: 12, textAlign: "center" }}>
-                  No plan yet. Hit Generate, or build tomorrow's plan the night before.
+                <div
+                  style={{
+                    padding: "48px 24px",
+                    color: "#706d68",
+                    ...mono,
+                    fontSize: 12,
+                    textAlign: "center",
+                    lineHeight: 1.9,
+                  }}
+                >
+                  {habits.length
+                    ? "Nothing on today yet. Add habits lays out your habits - everything else comes from the Tomorrow tab or Chat."
+                    : "Nothing on today yet. You have no habits, so there is nothing to lay out - plan the day in the Tomorrow tab, or add blocks through Chat."}
                 </div>
               )}
               {doneBlocks.map((b) => (
@@ -1247,38 +1337,101 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
 
         {tab === "tomorrow" && (
           <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
-            <div style={{ padding: "14px 20px", borderBottom: "1px solid rgba(255,255,255,0.09)" }}>
-              <div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontStyle: "italic", color: "#b0aca6" }}>
-                {tomorrowDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
+            {/* --- header: date, planned-state, segment switch --- */}
+            <div style={{ padding: "14px 20px 0", flexShrink: 0 }}>
+              <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontStyle: "italic", lineHeight: 1.15 }}>
+                {tomorrowDate.toLocaleDateString("en-US", { weekday: "long" })}
               </div>
-            </div>
-            <div style={{ flex: 1, overflowY: "auto" }}>
-              <div style={{ padding: "14px 20px 0" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                  <div style={sectionLabel}>Suggestions</div>
+              <div style={{ ...sectionLabel, marginTop: 5 }}>
+                {tomorrowDate.toLocaleDateString("en-US", { month: "long", day: "numeric" })}
+                {" · "}
+                <span style={{ color: tomorrowPlan.length ? "#8eaefb" : "#706d68" }}>
+                  {tomorrowPlan.length
+                    ? tomorrowPlan.length + " block" + (tomorrowPlan.length === 1 ? "" : "s") + " planned"
+                    : "not planned yet"}
+                </span>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 4,
+                  background: "#22222a",
+                  border: "1px solid rgba(255,255,255,0.09)",
+                  borderRadius: 9,
+                  padding: 3,
+                  marginTop: 13,
+                }}
+              >
+                {[
+                  { id: "ideas", label: "Ideas", n: selectedSuggestions.length },
+                  { id: "plan", label: "Plan", n: tomorrowPlan.length },
+                ].map((v) => (
                   <button
-                    onClick={loadSuggestions}
-                    disabled={sugLoading}
+                    key={v.id}
+                    onClick={() => setTmrView(v.id)}
                     style={{
-                      background: "none",
-                      border: "1px solid rgba(255,255,255,0.09)",
+                      flex: 1,
+                      background: tmrView === v.id ? "rgba(142,174,251,0.16)" : "none",
+                      border: "none",
                       borderRadius: 6,
-                      padding: "4px 10px",
-                      fontSize: 11,
-                      color: "#706d68",
+                      padding: "7px 0",
                       cursor: "pointer",
                       ...mono,
+                      fontSize: 11,
+                      letterSpacing: "0.06em",
+                      color: tmrView === v.id ? "#8eaefb" : "#706d68",
                     }}
                   >
-                    {sugLoading ? "..." : "refresh"}
+                    {v.label}
+                    <span
+                      style={{
+                        marginLeft: 5,
+                        color: tmrView === v.id ? "#8eaefb" : "#4a4a55",
+                        opacity: tmrView === v.id ? 0.75 : 1,
+                      }}
+                    >
+                      {v.n}
+                    </span>
                   </button>
-                </div>
-                {!tomorrowSuggestions.length && (
-                  <div style={{ color: "#706d68", fontSize: 12, ...mono, padding: "8px 0 14px" }}>
-                    Hit refresh to see what Claude suggests.
+                ))}
+              </div>
+            </div>
+
+            {/* --- segment body --- */}
+            <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px 6px" }}>
+              {tmrView === "ideas" ? (
+                <>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      marginBottom: 11,
+                    }}
+                  >
+                    <div style={sectionLabel}>Suggestions</div>
+                    <button onClick={loadSuggestions} disabled={sugLoading} style={ghostBtn}>
+                      {sugLoading ? "..." : "refresh"}
+                    </button>
                   </div>
-                )}
-                <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
+
+                  {!tomorrowSuggestions.length && (
+                    <div
+                      style={{
+                        color: "#706d68",
+                        fontSize: 12,
+                        ...mono,
+                        textAlign: "center",
+                        padding: "44px 12px",
+                        lineHeight: 1.9,
+                      }}
+                    >
+                      {sugLoading
+                        ? "thinking..."
+                        : "Hit refresh to see what Claude suggests, or just say what tomorrow needs below."}
+                    </div>
+                  )}
+
                   {tomorrowSuggestions.map((sug, i) => {
                     const sel = selectedSuggestions.includes(sug.title);
                     return (
@@ -1293,7 +1446,8 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
                           background: sel ? "rgba(142,174,251,0.1)" : "#22222a",
                           border: `1px solid ${sel ? "rgba(142,174,251,0.4)" : "rgba(255,255,255,0.09)"}`,
                           borderRadius: 10,
-                          padding: "11px 14px",
+                          padding: "11px 13px",
+                          marginBottom: 7,
                           cursor: "pointer",
                           display: "flex",
                           gap: 10,
@@ -1307,7 +1461,7 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
                             borderRadius: "50%",
                             background: SUG_COLORS[sug.type] || "#706d68",
                             flexShrink: 0,
-                            marginTop: 4,
+                            marginTop: 5,
                           }}
                         />
                         <div style={{ flex: 1 }}>
@@ -1318,54 +1472,119 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
                       </div>
                     );
                   })}
-                </div>
-              </div>
+                </>
+              ) : (
+                <>
+                  {!tomorrowPlan.length && (
+                    <div
+                      style={{
+                        color: "#706d68",
+                        fontSize: 12,
+                        ...mono,
+                        textAlign: "center",
+                        padding: "44px 12px",
+                        lineHeight: 1.9,
+                      }}
+                    >
+                      Nothing built yet. Pick a few ideas or say what you need, then hit Build tomorrow's plan.
+                    </div>
+                  )}
 
-              {tomorrowPlan.length > 0 && (
-                <div style={{ padding: "0 20px 14px" }}>
-                  <div style={{ ...sectionLabel, marginBottom: 10 }}>Plan for tomorrow</div>
-                  {tomorrowPlan.map((b) => (
-                    <div key={b.id} style={{ ...card, padding: "11px 14px", marginBottom: 7 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-                        <div style={{ fontSize: 11, ...mono, color: "#8eaefb" }}>{b.time}</div>
-                        {b.duration && <div style={{ fontSize: 10, ...mono, color: "#706d68" }}>{b.duration}</div>}
-                        <ImpDots imp={b.imp} />
+                  {groupByPhase(tomorrowPlan).map((g, gi) => (
+                    <div key={g.label + gi}>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                          margin: gi ? "16px 0 9px" : "2px 0 9px",
+                        }}
+                      >
+                        <div style={sectionLabel}>{g.label}</div>
+                        <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" }} />
                       </div>
-                      <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 2 }}>{b.title}</div>
-                      <div style={{ fontSize: 12, color: "#b0aca6", lineHeight: 1.5 }}>{b.desc}</div>
+                      {g.blocks.map((b) => (
+                        <div key={b.id} style={{ ...card, padding: "11px 13px", marginBottom: 7 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                            {b.duration && <div style={{ fontSize: 10, ...mono, color: "#706d68" }}>{b.duration}</div>}
+                            <div style={{ marginLeft: "auto" }}>
+                              <ImpDots imp={b.imp} />
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 2 }}>{b.title}</div>
+                          <div style={{ fontSize: 12, color: "#b0aca6", lineHeight: 1.5 }}>{b.desc}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+
+            {/* --- dock: picks, chat, composer, build. Pinned across both segments. --- */}
+            <div
+              style={{
+                flexShrink: 0,
+                borderTop: "1px solid rgba(255,255,255,0.09)",
+                padding: "10px 20px 16px",
+              }}
+            >
+              {selectedSuggestions.length > 0 && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 9 }}>
+                  {selectedSuggestions.map((sTitle) => (
+                    <div
+                      key={sTitle}
+                      style={{
+                        background: "rgba(142,174,251,0.13)",
+                        border: "1px solid rgba(142,174,251,0.3)",
+                        color: "#8eaefb",
+                        borderRadius: 99,
+                        padding: "4px 8px 4px 10px",
+                        fontSize: 11,
+                        display: "flex",
+                        gap: 6,
+                        alignItems: "center",
+                        ...mono,
+                      }}
+                    >
+                      {sTitle}
+                      <span
+                        onClick={() => setSelectedSuggestions((prev) => prev.filter((x) => x !== sTitle))}
+                        style={{ color: "rgba(142,174,251,0.6)", cursor: "pointer" }}
+                      >
+                        &times;
+                      </span>
                     </div>
                   ))}
                 </div>
               )}
 
-              <div style={{ borderTop: "1px solid rgba(255,255,255,0.09)", padding: "12px 20px 20px" }}>
-                <div style={{ fontSize: 11, ...mono, color: "#706d68", marginBottom: 8 }}>
-                  {selectedSuggestions.length
-                    ? selectedSuggestions.length + ' selected - add anything else, then say "generate"'
-                    : "Pick suggestions above or just tell me what tomorrow needs"}
-                </div>
+              {(tmrChat.length > 0 || tmrLoading) && (
                 <div
                   style={{
-                    maxHeight: 140,
+                    maxHeight: 104,
                     overflowY: "auto",
                     display: "flex",
                     flexDirection: "column",
-                    gap: 8,
-                    marginBottom: 10,
+                    gap: 7,
+                    marginBottom: 9,
                   }}
                 >
                   {tmrChat.map((m, i) => (
                     <div
                       key={i}
                       style={{
-                        maxWidth: "90%",
-                        padding: "8px 12px",
+                        maxWidth: "88%",
+                        padding: "7px 11px",
                         borderRadius: 10,
                         fontSize: 13,
-                        lineHeight: 1.6,
+                        lineHeight: 1.55,
                         alignSelf: m.role === "user" ? "flex-end" : "flex-start",
                         background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#2a2a34",
-                        border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)",
+                        border:
+                          m.role === "user"
+                            ? "1px solid rgba(142,174,251,0.28)"
+                            : "1px solid rgba(255,255,255,0.09)",
                       }}
                     >
                       {m.content}
@@ -1374,32 +1593,66 @@ Rough one. Rebuilt the rest of your day around the afternoon you lost.
                   {tmrLoading && <div style={{ fontSize: 12, color: "#706d68", ...mono }}>thinking...</div>}
                   <div ref={tmrEndRef} />
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <input
-                    value={tmrInput}
-                    onChange={(e) => setTmrInput(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && sendTomorrowChat()}
-                    placeholder="I also need to... / generate"
-                    style={inputStyle}
-                  />
-                  <button
-                    onClick={sendTomorrowChat}
-                    disabled={tmrLoading}
-                    style={{
-                      background: "rgba(142,174,251,0.16)",
-                      border: "1px solid rgba(142,174,251,0.28)",
-                      borderRadius: 7,
-                      padding: "10px 14px",
-                      color: "#8eaefb",
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Send
-                  </button>
-                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 7 }}>
+                <input
+                  value={tmrInput}
+                  onChange={(e) => setTmrInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && sendTomorrowChat()}
+                  placeholder={
+                    selectedSuggestions.length ? "Anything else tomorrow needs..." : "Tell me what tomorrow needs..."
+                  }
+                  style={inputStyle}
+                />
+                <button
+                  onClick={sendTomorrowChat}
+                  disabled={tmrLoading}
+                  style={{
+                    background: "rgba(142,174,251,0.16)",
+                    border: "1px solid rgba(142,174,251,0.28)",
+                    borderRadius: 8,
+                    padding: "0 13px",
+                    color: "#8eaefb",
+                    fontSize: 12,
+                    fontWeight: 500,
+                    cursor: "pointer",
+                  }}
+                >
+                  Send
+                </button>
               </div>
+
+              <button
+                onClick={() => buildTomorrow(null)}
+                disabled={planLoading}
+                style={
+                  tomorrowPlan.length
+                    ? {
+                        width: "100%",
+                        marginTop: 8,
+                        background: "none",
+                        border: "1px solid rgba(255,255,255,0.09)",
+                        borderRadius: 8,
+                        padding: "10px 0",
+                        color: "#706d68",
+                        ...mono,
+                        fontSize: 11.5,
+                        cursor: "pointer",
+                        opacity: planLoading ? 0.6 : 1,
+                      }
+                    : {
+                        ...primaryBtn,
+                        width: "100%",
+                        marginTop: 8,
+                        padding: "11px 0",
+                        fontSize: 13,
+                        opacity: planLoading ? 0.6 : 1,
+                      }
+                }
+              >
+                {planLoading ? "..." : tomorrowPlan.length ? "rebuild from scratch" : "Build tomorrow's plan"}
+              </button>
             </div>
           </div>
         )}
