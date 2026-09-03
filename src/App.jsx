@@ -246,6 +246,7 @@ export default function App() {
 
   const [ideaInput, setIdeaInput] = useState("");
   const [toasts, setToasts] = useState([]);
+  const [transferCode, setTransferCode] = useState(null);
 
   const now = new Date();
   const todayK = isoKey(now);
@@ -369,6 +370,67 @@ export default function App() {
     }, 2500);
     return () => clearTimeout(mirrorTimerRef.current);
   }, [goals, tasks, habits, ideas, todayPlan, tomorrowPlan, context]);
+
+  // Moving Locus between devices. localStorage never leaves the browser it was
+  // written in, so without this a new phone or laptop starts empty and the old
+  // one holds the only copy of everything.
+  async function sendToDevice() {
+    setTransferCode(null);
+    try {
+      const res = await fetch("/.netlify/functions/transfer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "create",
+          state: {
+            goals, tasks, habits, ideas, todayPlan, tomorrowPlan,
+            planArchive, history, skipPatterns, timestamps, context,
+          },
+        }),
+      });
+      const data = await res.json();
+      if (data.code) setTransferCode(data.code);
+      else toast(data.error || "Couldn't create a code");
+    } catch {
+      toast("Couldn't reach the server");
+    }
+  }
+
+  async function receiveFromDevice() {
+    const code = window.prompt("Enter the code shown on your other device:");
+    if (!code) return;
+    try {
+      const res = await fetch("/.netlify/functions/transfer", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "claim", code }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        toast(data.error);
+        return;
+      }
+      const s = data.state || {};
+      const counts = `${(s.goals || []).length} goals, ${(s.tasks || []).length} tasks, ${(s.habits || []).length} habits`;
+      if (!window.confirm(`Received ${counts}. This replaces everything currently in Locus on this device. Continue?`)) return;
+
+      if (Array.isArray(s.goals)) setGoals(s.goals);
+      if (Array.isArray(s.tasks)) setTasks(s.tasks);
+      if (Array.isArray(s.habits)) setHabits(s.habits);
+      if (Array.isArray(s.ideas)) setIdeas(s.ideas);
+      if (Array.isArray(s.todayPlan)) setTodayPlan(s.todayPlan);
+      if (Array.isArray(s.tomorrowPlan)) setTomorrowPlan(s.tomorrowPlan);
+      if (Array.isArray(s.history)) setHistory(s.history);
+      if (Array.isArray(s.context)) setContext(s.context);
+      if (s.planArchive && typeof s.planArchive === "object") setPlanArchive(s.planArchive);
+      if (s.skipPatterns && typeof s.skipPatterns === "object") setSkipPatterns(s.skipPatterns);
+      if (s.timestamps && typeof s.timestamps === "object") setTimestamps(s.timestamps);
+
+      toast("Data received from your other device");
+    } catch {
+      toast("Couldn't reach the server");
+    }
+  }
 
   const toast = (msg) => {
     const id = uid();
@@ -1279,6 +1341,67 @@ Rough one. Dropped the deep work block and moved the call to tonight.
               reset all
             </button>
           </div>
+
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <button
+              onClick={sendToDevice}
+              style={{
+                flex: 1,
+                background: "none",
+                border: "1px solid rgba(255,255,255,0.09)",
+                borderRadius: 6,
+                padding: "5px 6px",
+                fontSize: 9,
+                color: "#706d68",
+                cursor: "pointer",
+                ...mono,
+              }}
+            >
+              send to device
+            </button>
+            <button
+              onClick={receiveFromDevice}
+              style={{
+                flex: 1,
+                background: "none",
+                border: "1px solid rgba(255,255,255,0.09)",
+                borderRadius: 6,
+                padding: "5px 6px",
+                fontSize: 9,
+                color: "#706d68",
+                cursor: "pointer",
+                ...mono,
+              }}
+            >
+              receive
+            </button>
+          </div>
+
+          {transferCode && (
+            <div
+              style={{
+                marginTop: 8,
+                padding: "8px 10px",
+                border: "1px solid rgba(142,174,251,0.28)",
+                borderRadius: 6,
+                background: "rgba(142,174,251,0.08)",
+              }}
+            >
+              <div style={{ fontSize: 9, color: "#706d68", ...mono }}>enter on your other device</div>
+              <div
+                style={{
+                  fontSize: 18,
+                  letterSpacing: 3,
+                  color: "#8eaefb",
+                  marginTop: 4,
+                  ...mono,
+                }}
+              >
+                {transferCode}
+              </div>
+              <div style={{ fontSize: 9, color: "#706d68", marginTop: 4, ...mono }}>expires in 15 min &middot; one use</div>
+            </div>
+          )}
         </div>
       </div>
 
