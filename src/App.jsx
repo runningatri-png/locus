@@ -259,6 +259,7 @@ export default function App() {
   const tmrEndRef = useRef(null);
   const rolledRef = useRef(false);
   const inboxDrainedRef = useRef(false);
+  const mirrorTimerRef = useRef(null);
 
   useEffect(() => save(KEYS.goals, goals), [goals]);
   useEffect(() => save(KEYS.tasks, tasks), [tasks]);
@@ -351,6 +352,23 @@ export default function App() {
       }
     })();
   }, []);
+
+  // Mirrors a read-only snapshot to the server so the Locus MCP connector can
+  // answer questions about what's actually in here ("what's on my plate
+  // Monday?"). localStorage stays the source of truth - this is a replica, and
+  // every connector read reports its own age. Debounced so a burst of edits
+  // sends one write.
+  useEffect(() => {
+    if (mirrorTimerRef.current) clearTimeout(mirrorTimerRef.current);
+    mirrorTimerRef.current = setTimeout(() => {
+      fetch("/.netlify/functions/state", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goals, tasks, habits, ideas, todayPlan, tomorrowPlan, context }),
+      }).catch(() => {});
+    }, 2500);
+    return () => clearTimeout(mirrorTimerRef.current);
+  }, [goals, tasks, habits, ideas, todayPlan, tomorrowPlan, context]);
 
   const toast = (msg) => {
     const id = uid();

@@ -31,6 +31,56 @@ function inboxStore() {
   return getStore(opts)
 }
 
+function stateStore() {
+  const opts = { name: 'locus-state', consistency: 'strong' }
+  const siteID = process.env.SITE_ID || process.env.NETLIFY_SITE_ID
+  if (process.env.NETLIFY_API_TOKEN && siteID) {
+    opts.siteID = siteID
+    opts.token = process.env.NETLIFY_API_TOKEN
+  }
+  return getStore(opts)
+}
+
+// How old the snapshot is, in words. Every read says this, so a stale replica
+// is never mistaken for live data.
+function freshness(updatedAt) {
+  if (!updatedAt) return 'unknown age'
+  const mins = Math.round((Date.now() - updatedAt) / 60000)
+  if (mins < 2) return 'just now'
+  if (mins < 60) return `${mins} min ago`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.round(hrs / 24)}d ago`
+}
+
+const READ_TOOLS = [
+  {
+    name: 'get_today',
+    description: "Read today's plan in Locus - the blocks laid out for today and whether each is done, pending or skipped.",
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_tasks',
+    description: 'Read the task list in Locus, with due dates and importance.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        include_done: { type: 'boolean', description: 'Include completed tasks. Default false.' },
+      },
+    },
+  },
+  {
+    name: 'get_goals',
+    description: 'Read goals in Locus, grouped by front burner / maintenance / back burner.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_habits',
+    description: 'Read habits in Locus with current streaks and whether each is ticked today.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+]
+
 const TOOLS = [
   {
     name: 'add_task',
@@ -186,6 +236,64 @@ const json = (payload, status = 200) =>
     headers: { ...CORS, 'Content-Type': 'application/json' },
   })
 
+async function handleRead(toolName, args) {
+  const snap = await stateStore().get('current', { type: 'json' })
+  if (!snap) {
+    return "No snapshot of Locus yet - the app mirrors one whenever it's open, so open Locus once and this will start working."
+  }
+
+  const age = freshness(snap.updatedAt)
+  const head = `Locus as of ${age}:`
+
+  if (toolName === 'get_today') {
+    const plan = snap.todayPlan || []
+    if (!plan.length) return `${head}\nNo plan laid out for today yet.`
+    const lines = plan.map((b) => {
+      const state = b.done ? 'done' : b.status === 'skipped' ? 'skipped' : 'pending'
+      return `- [${state}] ${b.time || 'Anytime'}: ${b.title}${b.duration ? ` (${b.duration})` : ''}${b.desc ? ` - ${b.desc}` : ''}`
+    })
+    return `${head}\nToday's plan (${plan.length} blocks):\n${lines.join('\n')}`
+  }
+
+  if (toolName === 'get_tasks') {
+    const all = snap.tasks || []
+    const list = args.include_done ? all : all.filter((t) => !t.done)
+    if (!list.length) return `${head}\nNo open tasks.`
+    const lines = list.map(
+      (t) => `- ${t.name}${t.due ? ` (due ${t.due})` : ''}${t.goal ? ` [goal: ${t.goal}]` : ''}${t.imp === 3 ? ' [high]' : ''}${t.done ? ' [done]' : ''}`
+    )
+    return `${head}\n${list.length} task(s):\n${lines.join('\n')}`
+  }
+
+  if (toolName === 'get_goals') {
+    const goals = snap.goals || []
+    if (!goals.length) return `${head}\nNo goals set.`
+    const label = { front: 'Front burner', maint: 'Maintenance', back: 'Back burner' }
+    const groups = ['front', 'maint', 'back']
+      .map((p) => {
+        const inGroup = goals.filter((g) => (g.p || 'maint') === p)
+        if (!inGroup.length) return null
+        const lines = inGroup.map(
+          (g) => `- ${g.name}${g.area ? ` (${g.area})` : ''}${g.deadline ? ` - deadline ${g.deadline}` : ''}${g.desc ? `: ${g.desc}` : ''}`
+        )
+        return `${label[p]}:\n${lines.join('\n')}`
+      })
+      .filter(Boolean)
+    return `${head}\n${groups.join('\n\n')}`
+  }
+
+  if (toolName === 'get_habits') {
+    const habits = snap.habits || []
+    if (!habits.length) return `${head}\nNo habits set.`
+    const lines = habits.map(
+      (h) => `- ${h.name}${h.freq ? ` (${h.freq})` : ''} - ${h.tickedToday ? 'done today' : 'not yet today'}, streak ${h.streak || 0}${h.note ? ` - ${h.note}` : ''}`
+    )
+    return `${head}\n${habits.length} habit(s):\n${lines.join('\n')}`
+  }
+
+  return 'Unknown read tool.'
+}
+
 export default async (req) => {
   const url = new URL(req.url)
 
@@ -221,11 +329,17 @@ export default async (req) => {
 
     if (method === 'ping') return respond({})
 
-    if (method === 'tools/list') return respond({ tools: TOOLS })
+    if (method === 'tools/list') return respond({ tools: [...TOOLS, ...READ_TOOLS] })
 
     if (method === 'tools/call') {
       const toolName = params && params.name
       const args = (params && params.arguments) || {}
+
+      if (READ_TOOLS.some((t) => t.name === toolName)) {
+        const text = await handleRead(toolName, args)
+        return respond({ content: [{ type: 'text', text }], isError: false })
+      }
+
       const action = toAction(toolName, args)
       if (!action) return respondErr(-32602, `Unknown tool: ${toolName}`)
       if (!action.name && !action.text) return respondErr(-32602, 'Missing required field')
