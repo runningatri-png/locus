@@ -158,7 +158,18 @@ function describeAction(a) {
 function checkAuth(req, url) {
   const secret = process.env.MCP_SHARED_SECRET
   if (!secret) return false
+
+  // Claude's connector dialog only offers standard header names out of the box
+  // (custom ones need Anthropic's approval first), so accept the usual
+  // suspects rather than insisting on one. Query param stays as a fallback for
+  // accounts without the request-headers beta.
+  if (req.headers.get('x-api-key') === secret) return true
+  if (req.headers.get('x-auth-token') === secret) return true
   if (req.headers.get('x-mcp-secret') === secret) return true
+
+  const auth = req.headers.get('authorization')
+  if (auth === secret || auth === `Bearer ${secret}`) return true
+
   if (url.searchParams.get('key') === secret) return true
   return false
 }
@@ -166,7 +177,7 @@ function checkAuth(req, url) {
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, x-mcp-secret, mcp-protocol-version',
+  'Access-Control-Allow-Headers': 'Content-Type, x-api-key, x-auth-token, x-mcp-secret, authorization, mcp-protocol-version',
 }
 
 const json = (payload, status = 200) =>
