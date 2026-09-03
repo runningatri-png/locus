@@ -258,6 +258,7 @@ export default function App() {
   const chatEndRef = useRef(null);
   const tmrEndRef = useRef(null);
   const rolledRef = useRef(false);
+  const inboxDrainedRef = useRef(false);
 
   useEffect(() => save(KEYS.goals, goals), [goals]);
   useEffect(() => save(KEYS.tasks, tasks), [tasks]);
@@ -313,6 +314,43 @@ export default function App() {
       localStorage.removeItem(KEYS.tomorrowDate);
     }
   }, [todayK]);
+
+  // Drains actions queued by the Locus MCP connector (netlify/functions/mcp.js) -
+  // e.g. saying "add this to Locus" in a plain Claude chat away from this app.
+  // Runs once per page load, applies them through the SAME applyActions() the
+  // in-app chat uses, then clears the queue server-side. If the backend isn't
+  // deployed yet, or you're offline, this just silently no-ops.
+  useEffect(() => {
+    if (inboxDrainedRef.current) return;
+    inboxDrainedRef.current = true;
+
+    (async () => {
+      try {
+        const res = await fetch("/.netlify/functions/inbox");
+        if (!res.ok) return;
+        const { actions } = await res.json();
+        if (!actions || !actions.length) return;
+
+        // applyActions() only reads the fields each action type cares about
+        // (type, name, due, ...), so the queue's own id/ts fields are harmless noise.
+        const result = applyActions(actions, { gs: goals, ts: tasks, hs: habits, is: ideas });
+        setGoals(result.gs);
+        setTasks(result.ts);
+        setHabits(result.hs);
+        setIdeas(result.is);
+        if (result.wantPlan) await generateToday(result);
+        if (result.wantTomorrow) await generateTomorrow("", result);
+
+        await fetch("/.netlify/functions/inbox", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: actions.map((a) => a.id) }),
+        });
+      } catch {
+        // offline or backend not deployed - Locus still works standalone off localStorage
+      }
+    })();
+  }, []);
 
   const toast = (msg) => {
     const id = uid();
