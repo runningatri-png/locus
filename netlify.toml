@@ -5,3 +5,8 @@
 
 [functions]
   node_bundler = "esbuild"
+
+[build.environment]
+  # @netlify/blobs v11 needs Node >= 22.12; pin it so the functions build
+  # doesn't fall back to an older default.
+  NODE_VERSION = "22"
