@@ -3,24 +3,26 @@
 // have it land here. Hand-rolled (no MCP SDK) to avoid bundler surprises;
 // it speaks the minimal JSON-RPC subset a tool-calling client needs:
 // initialize, tools/list, tools/call. No streaming/session state - every
-// request is self-contained, which is exactly what a serverless function wants.
+// request is self-contained, which is what a serverless function wants.
 //
 // Tool calls don't touch Locus's data directly. They translate 1:1 into the
 // same action objects the in-app chat already produces (see the ACTIONS list
-// in sendChat()'s system prompt in src/App.jsx) and drop them in a queue
+// in sendChat()'s system prompt in src/App.jsx) and land in a queue
 // (netlify/functions/inbox.js). The app drains that queue through its own
-// existing applyActions() next time it's opened - so this file never needs
-// to duplicate Locus's business logic, only speak its action language.
-const crypto = require('crypto')
-const { getStore } = require('@netlify/blobs')
+// existing applyActions() next time it's opened - so this file never has to
+// duplicate Locus's business logic, only speak its action language.
+//
+// Written against Netlify's v2 function API (standard Request/Response).
+// v1 handlers on this site don't get Netlify Blobs credentials injected.
+import { getStore } from '@netlify/blobs'
+import crypto from 'node:crypto'
+
+export const config = { path: '/mcp' }
 
 const PROTOCOL_VERSION = '2025-06-18'
 
 function inboxStore() {
   const opts = { name: 'locus-inbox', consistency: 'strong' }
-  // Netlify normally injects blob credentials into the function environment.
-  // Some site runtimes don't, so fall back to explicit credentials when a
-  // NETLIFY_API_TOKEN is configured.
   const siteID = process.env.SITE_ID || process.env.NETLIFY_SITE_ID
   if (process.env.NETLIFY_API_TOKEN && siteID) {
     opts.siteID = siteID
@@ -32,7 +34,7 @@ function inboxStore() {
 const TOOLS = [
   {
     name: 'add_task',
-    description: "Add a to-do to Locus. Not scheduled to a time slot - shows up in the task list for planning.",
+    description: 'Add a to-do to Locus. Not scheduled to a time slot - shows up in the task list for planning.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -153,56 +155,45 @@ function describeAction(a) {
   }
 }
 
-function checkAuth(event) {
+function checkAuth(req, url) {
   const secret = process.env.MCP_SHARED_SECRET
   if (!secret) return false
-  const headers = event.headers || {}
-  const header = headers['x-mcp-secret'] || headers['X-Mcp-Secret']
-  if (header === secret) return true
-  const qs = event.queryStringParameters || {}
-  if (qs.key === secret) return true
+  if (req.headers.get('x-mcp-secret') === secret) return true
+  if (url.searchParams.get('key') === secret) return true
   return false
 }
 
-exports.handler = async (event) => {
-  const cors = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, x-mcp-secret, mcp-protocol-version',
-  }
+const CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, x-mcp-secret, mcp-protocol-version',
+}
 
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 200, headers: cors, body: '' }
+const json = (payload, status = 200) =>
+  new Response(JSON.stringify(payload), {
+    status,
+    headers: { ...CORS, 'Content-Type': 'application/json' },
+  })
+
+export default async (req) => {
+  const url = new URL(req.url)
+
+  if (req.method === 'OPTIONS') return new Response('', { status: 200, headers: CORS })
+  if (req.method !== 'POST') {
+    return new Response('This endpoint speaks MCP over POST.', { status: 405, headers: CORS })
   }
-  if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, headers: cors, body: 'This endpoint speaks MCP over POST.' }
-  }
-  if (!checkAuth(event)) {
-    return { statusCode: 401, headers: cors, body: JSON.stringify({ error: 'Unauthorized' }) }
-  }
+  if (!checkAuth(req, url)) return json({ error: 'Unauthorized' }, 401)
 
   let rpc
   try {
-    rpc = JSON.parse(event.body || '{}')
+    rpc = await req.json()
   } catch {
-    return {
-      statusCode: 400,
-      headers: cors,
-      body: JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }),
-    }
+    return json({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } }, 400)
   }
 
   const { id, method, params } = rpc
-  const respond = (result) => ({
-    statusCode: 200,
-    headers: { ...cors, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id, result }),
-  })
-  const respondErr = (code, message) => ({
-    statusCode: 200,
-    headers: { ...cors, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id, error: { code, message } }),
-  })
+  const respond = (result) => json({ jsonrpc: '2.0', id, result })
+  const respondErr = (code, message) => json({ jsonrpc: '2.0', id, error: { code, message } })
 
   try {
     if (method === 'initialize') {
@@ -214,7 +205,7 @@ exports.handler = async (event) => {
     }
 
     if (method === 'notifications/initialized' || method === 'notifications/cancelled') {
-      return { statusCode: 202, headers: cors, body: '' }
+      return new Response('', { status: 202, headers: CORS })
     }
 
     if (method === 'ping') return respond({})
