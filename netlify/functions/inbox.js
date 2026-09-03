@@ -5,7 +5,16 @@
 const { getStore } = require('@netlify/blobs')
 
 function inboxStore() {
-  return getStore({ name: 'locus-inbox', consistency: 'strong' })
+  const opts = { name: 'locus-inbox', consistency: 'strong' }
+  // Netlify normally injects blob credentials into the function environment.
+  // Some site runtimes don't, so fall back to explicit credentials when a
+  // NETLIFY_API_TOKEN is configured.
+  const siteID = process.env.SITE_ID || process.env.NETLIFY_SITE_ID
+  if (process.env.NETLIFY_API_TOKEN && siteID) {
+    opts.siteID = siteID
+    opts.token = process.env.NETLIFY_API_TOKEN
+  }
+  return getStore(opts)
 }
 
 exports.handler = async (event) => {
@@ -17,6 +26,24 @@ exports.handler = async (event) => {
 
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers, body: '' }
+  }
+
+  // ?debug=1 reports which credentials the runtime actually provides.
+  // Names and booleans only - never values.
+  if ((event.queryStringParameters || {}).debug === '1') {
+    return {
+      statusCode: 200,
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        node: process.version,
+        hasBlobsContext: !!process.env.NETLIFY_BLOBS_CONTEXT,
+        hasSiteId: !!(process.env.SITE_ID || process.env.NETLIFY_SITE_ID),
+        hasApiToken: !!process.env.NETLIFY_API_TOKEN,
+        netlifyKeys: Object.keys(process.env).filter(
+          (k) => k.startsWith('NETLIFY') || k === 'SITE_ID' || k === 'DEPLOY_ID' || k === 'CONTEXT'
+        ),
+      }),
+    }
   }
 
   try {

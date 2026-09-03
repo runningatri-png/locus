@@ -17,7 +17,16 @@ const { getStore } = require('@netlify/blobs')
 const PROTOCOL_VERSION = '2025-06-18'
 
 function inboxStore() {
-  return getStore({ name: 'locus-inbox', consistency: 'strong' })
+  const opts = { name: 'locus-inbox', consistency: 'strong' }
+  // Netlify normally injects blob credentials into the function environment.
+  // Some site runtimes don't, so fall back to explicit credentials when a
+  // NETLIFY_API_TOKEN is configured.
+  const siteID = process.env.SITE_ID || process.env.NETLIFY_SITE_ID
+  if (process.env.NETLIFY_API_TOKEN && siteID) {
+    opts.siteID = siteID
+    opts.token = process.env.NETLIFY_API_TOKEN
+  }
+  return getStore(opts)
 }
 
 const TOOLS = [
