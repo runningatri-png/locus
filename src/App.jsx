@@ -360,6 +360,14 @@ export default function App() {
   // every connector read reports its own age. Debounced so a burst of edits
   // sends one write.
   useEffect(() => {
+    // A browser with nothing in it has nothing worth publishing - without this,
+    // opening Locus in a fresh browser wipes the snapshot of the device that
+    // actually holds the data. The server refuses these too; this just stops
+    // the pointless request.
+    const empty =
+      !goals.length && !tasks.length && !habits.length && !ideas.length && !todayPlan.length && !tomorrowPlan.length;
+    if (empty) return;
+
     if (mirrorTimerRef.current) clearTimeout(mirrorTimerRef.current);
     mirrorTimerRef.current = setTimeout(() => {
       fetch("/.netlify/functions/state", {

@@ -23,6 +23,17 @@ function stateStore() {
   return getStore(opts)
 }
 
+function isEmpty(s) {
+  return !(
+    (s.goals || []).length ||
+    (s.tasks || []).length ||
+    (s.habits || []).length ||
+    (s.ideas || []).length ||
+    (s.todayPlan || []).length ||
+    (s.tomorrowPlan || []).length
+  )
+}
+
 const CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
@@ -61,6 +72,20 @@ export default async (req) => {
     updatedAt: Date.now(),
   }
 
-  await stateStore().setJSON('current', snapshot)
+  // A browser that has never had Locus opened in it mirrors an empty state,
+  // which would otherwise wipe the replica of a device that actually has data.
+  // The snapshot is the only thing Claude can read, so refuse that overwrite.
+  const store = stateStore()
+  if (isEmpty(snapshot) && !body.allowEmpty) {
+    const existing = await store.get('current', { type: 'json' })
+    if (existing && !isEmpty(existing)) {
+      return json({
+        skipped: true,
+        reason: 'Refused to overwrite a snapshot that has data with an empty one.',
+      })
+    }
+  }
+
+  await store.setJSON('current', snapshot)
   return json({ ok: true, updatedAt: snapshot.updatedAt })
 }
