@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { supabase, pullAll, pushItems, pushPlanDay, pushDoc, isEmptyState } from "./db";
 import "./App.css";
 
 const KEYS = {
@@ -185,7 +186,7 @@ function groupByPhase(blocks) {
   return groups;
 }
 
-const IMP_COLORS = ["", "#706d68", "#8eaefb", "#f28b82"];
+const IMP_COLORS = ["", "var(--muted)", "var(--accent)", "var(--red)"];
 
 function ImpDots({ imp }) {
   const level = Math.min(3, Math.max(1, imp || 2));
@@ -198,7 +199,7 @@ function ImpDots({ imp }) {
             width: 7,
             height: 7,
             borderRadius: "50%",
-            background: i <= level ? IMP_COLORS[level] : "#32323e",
+            background: i <= level ? IMP_COLORS[level] : "var(--chip)",
           }}
         />
       ))}
@@ -248,6 +249,14 @@ export default function App() {
   const [toasts, setToasts] = useState([]);
   const [transferCode, setTransferCode] = useState(null);
 
+  // Supabase is the source of truth; localStorage is an offline cache.
+  const [session, setSession] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [syncReady, setSyncReady] = useState(false);
+  const [syncNote, setSyncNote] = useState("");
+  const pushTimers = useRef({});
+  const hydratingRef = useRef(false);
+
   const now = new Date();
   const todayK = isoKey(now);
   const tomorrowDate = new Date(now.getTime() + 86400000);
@@ -273,6 +282,126 @@ export default function App() {
   useEffect(() => save(KEYS.timestamps, timestamps), [timestamps]);
   useEffect(() => save(KEYS.context, context), [context]);
   useEffect(() => save(KEYS.planArchive, planArchive), [planArchive]);
+
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session || null);
+      setAuthReady(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s || null);
+      if (!s) setSyncReady(false);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  const applyRemote = (remote) => {
+    hydratingRef.current = true;
+    setGoals(remote.goals);
+    setTasks(remote.tasks);
+    setHabits(remote.habits);
+    setIdeas(remote.ideas);
+    setPlanArchive(remote.planArchive);
+    setTodayPlan(remote.planArchive[todayK] || []);
+    setTomorrowPlan(remote.planArchive[tomorrowK] || []);
+    setHistory(remote.history);
+    setSkipPatterns(remote.skipPatterns);
+    setTimestamps(remote.timestamps);
+    setContext(remote.context);
+    // Cleared after this render's effects have run, so hydrating never bounces
+    // straight back to the server as a write.
+    setTimeout(() => {
+      hydratingRef.current = false;
+    }, 0);
+  };
+
+  // First load after sign-in. If the account has no data yet but this browser
+  // does, this is the device holding the only copy - seed the server from it
+  // instead of wiping it. Otherwise the server wins.
+  useEffect(() => {
+    if (!session || syncReady) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const remote = await pullAll();
+        if (cancelled) return;
+        const uid = session.user.id;
+        const localHasData =
+          goals.length || tasks.length || habits.length || ideas.length || todayPlan.length || tomorrowPlan.length;
+
+        if (isEmptyState(remote) && localHasData) {
+          await Promise.all([
+            pushItems("goals", goals, uid),
+            pushItems("tasks", tasks, uid),
+            pushItems("habits", habits, uid),
+            pushItems("ideas", ideas, uid),
+            pushPlanDay(todayK, todayPlan, uid),
+            pushPlanDay(tomorrowK, tomorrowPlan, uid),
+            pushDoc("history", history, uid),
+            pushDoc("skipPatterns", skipPatterns, uid),
+            pushDoc("timestamps", timestamps, uid),
+            pushDoc("context", context, uid),
+            ...Object.entries(planArchive).map(([d, blocks]) => pushPlanDay(d, blocks, uid)),
+          ]);
+          setSyncNote("uploaded this device's data");
+        } else if (!isEmptyState(remote)) {
+          applyRemote(remote);
+        }
+
+        setSyncReady(true);
+      } catch {
+        setSyncNote("offline - local copy");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const queuePush = (key, run) => {
+    if (!session || !syncReady || hydratingRef.current) return;
+    clearTimeout(pushTimers.current[key]);
+    pushTimers.current[key] = setTimeout(() => {
+      pushTimers.current[key] = null;
+      run(session.user.id).catch(() => setSyncNote("not saved - will retry"));
+    }, 700);
+  };
+
+  useEffect(() => queuePush("goals", (uid) => pushItems("goals", goals, uid)), [goals]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("tasks", (uid) => pushItems("tasks", tasks, uid)), [tasks]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("habits", (uid) => pushItems("habits", habits, uid)), [habits]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("ideas", (uid) => pushItems("ideas", ideas, uid)), [ideas]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("today", (uid) => pushPlanDay(todayK, todayPlan, uid)), [todayPlan]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("tomorrow", (uid) => pushPlanDay(tomorrowK, tomorrowPlan, uid)), [tomorrowPlan]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("history", (uid) => pushDoc("history", history, uid)), [history]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("skips", (uid) => pushDoc("skipPatterns", skipPatterns, uid)), [skipPatterns]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("times", (uid) => pushDoc("timestamps", timestamps, uid)), [timestamps]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("context", (uid) => pushDoc("context", context, uid)), [context]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Coming back to the tab pulls whatever the other device did while away.
+  // Skipped if a local edit is still waiting to be written, so returning focus
+  // can never overwrite something typed a moment ago.
+  useEffect(() => {
+    if (!session || !syncReady) return;
+    const refresh = async () => {
+      if (document.visibilityState !== "visible") return;
+      if (Object.values(pushTimers.current).some(Boolean)) return;
+      try {
+        const remote = await pullAll();
+        if (!isEmptyState(remote)) applyRemote(remote);
+      } catch {
+        // stay on the local copy
+      }
+    };
+    document.addEventListener("visibilitychange", refresh);
+    window.addEventListener("focus", refresh);
+    return () => {
+      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("focus", refresh);
+    };
+  }, [session, syncReady, todayK, tomorrowK]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -899,8 +1028,8 @@ imp is 1, 2, or 3.`;
     setRescheduleTime("");
   }
 
-  async function sendChat() {
-    const msg = chatInput.trim();
+  async function sendChat(override) {
+    const msg = (typeof override === "string" ? override : chatInput).trim();
     if (!msg || chatLoading) return;
     setChatInput("");
     const nextHistory = [...chatHistory, { role: "user", content: msg }];
@@ -1059,30 +1188,8 @@ Rough one. Dropped the deep work block and moved the call to tonight.
   const completedCount = todayPlan.filter((b) => b.done).length;
   const progress = todayPlan.length ? Math.round((completedCount / todayPlan.length) * 100) : 0;
 
-  const SUG_COLORS = { goal: "#8eaefb", task: "#f28b82", social: "#b8a0fc", recovery: "#81c995", other: "#706d68" };
+  const SUG_COLORS = { goal: "var(--accent)", task: "var(--red)", social: "var(--violet)", recovery: "var(--green)", other: "var(--muted)" };
 
-  const navSections = [
-    {
-      title: "Plan",
-      items: [
-        { id: "today", label: "Today" },
-        { id: "tomorrow", label: "Tomorrow" },
-        { id: "calendar", label: "Calendar" },
-      ],
-    },
-    { title: "Chat", items: [{ id: "chat", label: "Chat" }] },
-    {
-      title: "Organize",
-      items: [
-        { id: "goals", label: "Goals", badge: goals.length },
-        { id: "tasks", label: "Tasks", badge: tasks.filter((t) => !t.done).length },
-        { id: "habits", label: "Habits", badge: habits.length },
-        { id: "ideas", label: "Ideas", badge: ideas.length },
-      ],
-    },
-    { title: "Review", items: [{ id: "history", label: "History" }] },
-  ];
-  const allNav = navSections.flatMap((s) => s.items);
 
   const calY = calMonth.getFullYear();
   const calM = calMonth.getMonth();
@@ -1105,58 +1212,145 @@ Rough one. Dropped the deep work block and moved the call to tonight.
     return history.some((h) => h.key === k);
   };
 
-  const card = { background: "#22222a", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 12 };
-  const mono = { fontFamily: "monospace" };
+
+  const [theme, setTheme] = useState(() => localStorage.getItem("locus_theme") || "light");
+  const [userName, setUserName] = useState(() => localStorage.getItem("locus_name") || "");
+  const [cmdInput, setCmdInput] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const cmdRef = useRef(null);
+
+  useEffect(() => localStorage.setItem("locus_theme", theme), [theme]);
+  useEffect(() => localStorage.setItem("locus_name", userName), [userName]);
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        cmdRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const mono = { fontFamily: "var(--mono)" };
+  const card = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
   const primaryBtn = {
-    background: "#8eaefb",
-    color: "#0e0f1a",
-    border: "none",
-    borderRadius: 7,
+    background: "var(--accent)",
+    color: "var(--on-accent)",
+    border: "1px solid var(--accent)",
+    borderRadius: 9,
     padding: "8px 14px",
-    fontSize: 12,
-    fontWeight: 500,
+    fontSize: 12.5,
+    fontWeight: 600,
+    fontFamily: "inherit",
     cursor: "pointer",
   };
   const ghostBtn = {
-    background: "none",
-    border: "1px solid rgba(255,255,255,0.09)",
-    borderRadius: 6,
-    padding: "4px 11px",
-    fontSize: 11,
-    color: "#706d68",
+    background: "var(--surface)",
+    border: "1px solid var(--border)",
+    borderRadius: 8,
+    padding: "5px 11px",
+    fontSize: 11.5,
+    fontFamily: "inherit",
+    color: "var(--muted)",
     cursor: "pointer",
-    ...mono,
   };
   const inputStyle = {
     flex: 1,
-    background: "#22222a",
-    border: "1px solid rgba(255,255,255,0.09)",
-    borderRadius: 7,
+    background: "var(--surface)",
+    border: "1px solid var(--border)",
+    borderRadius: 10,
     padding: "10px 14px",
-    fontSize: 16,
-    color: "#f2efe9",
+    fontSize: 14,
+    color: "var(--text)",
     outline: "none",
   };
   const sectionLabel = {
     fontSize: 10,
-    ...mono,
-    color: "#706d68",
+    fontWeight: 700,
+    color: "var(--muted)",
     textTransform: "uppercase",
-    letterSpacing: "0.1em",
+    letterSpacing: "0.12em",
   };
 
+  const NAV = [
+    {
+      title: "Plan",
+      items: [
+        { id: "today", label: "Today", icon: "home" },
+        { id: "calendar", label: "Calendar", icon: "calendar" },
+        { id: "tomorrow", label: "Plan", icon: "target" },
+        { id: "ideas", label: "Ideas", icon: "bulb", badge: ideas.length },
+      ],
+    },
+    {
+      title: "Organize",
+      items: [
+        { id: "goals", label: "Goals", icon: "compass", badge: goals.length },
+        { id: "tasks", label: "Tasks", icon: "check", badge: tasks.filter((t) => !t.done).length },
+        { id: "habits", label: "Habits", icon: "repeat", badge: habits.length },
+        { id: "chat", label: "Chat", icon: "chat" },
+        { id: "history", label: "History", icon: "clock" },
+      ],
+    },
+  ];
+  const ALL_NAV = NAV.flatMap((s) => s.items);
+
+  const REPLAN = [
+    { label: "Something came up", msg: "Something came up and my day shifted - rebuild the rest of today around it." },
+    { label: "I have less time", msg: "I have less time than planned today. Trim the plan down to what actually matters." },
+    { label: "I'm feeling low energy", msg: "I'm low energy right now. Reshape the rest of today into something I can actually do." },
+    { label: "Prioritize something", msg: "I want to prioritize one thing for the rest of today - ask me which, then rebuild around it." },
+    { label: "Tell Locus what changed", msg: "", accent: true },
+  ];
+
+  const hour = now.getHours();
+  const greeting =
+    (hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening") + (userName ? ", " + userName : "") + ".";
+
+  const CATS = {
+    school: { label: "School", icon: "book", color: "var(--blue)" },
+    career: { label: "Career", icon: "briefcase", color: "var(--violet)" },
+    health: { label: "Health", icon: "dumbbell", color: "var(--amber)" },
+    startup: { label: "Startup", icon: "rocket", color: "var(--red)" },
+    rest: { label: "Break", icon: "cup", color: "var(--green)" },
+    admin: { label: "Admin", icon: "folder", color: "var(--muted)" },
+    routine: { label: "Routine", icon: "star", color: "var(--accent)" },
+    focus: { label: "Focus", icon: "dot", color: "var(--accent)" },
+  };
+  const CAT_WORDS = [
+    ["school", /\b(class|lecture|study|homework|exam|problem set|reading|course|cs |acc |quiz|assignment|revision)\b/],
+    ["rest", /\b(break|lunch|dinner|breakfast|rest|nap|unwind|relax|recharge|meal|coffee)\b/],
+    ["health", /\b(workout|gym|run|lift|walk|yoga|stretch|sleep|health|training|cardio)\b/],
+    ["career", /\b(intern|job|apply|application|recruit|resume|interview|career|linkedin|networking)\b/],
+    ["startup", /\b(startup|launch|customer|build|ship|product|research|pitch|founder|market)\b/],
+    ["admin", /\b(email|inbox|admin|errand|chore|clean|bills|calendar|buffer|misc)\b/],
+    ["routine", /\b(review|plan|reflect|journal|meditat|routine|wind down|morning|evening)\b/],
+  ];
+  const catOf = (b) => {
+    const t = ((b.title || "") + " " + (b.desc || "")).toLowerCase();
+    for (const [key, re] of CAT_WORDS) if (re.test(t)) return CATS[key];
+    return CATS.focus;
+  };
+  const tint = (c, pct) => `color-mix(in srgb, ${c} ${pct}%, transparent)`;
+
+  const runCommand = () => {
+    const v = cmdInput.trim();
+    if (!v) return;
+    setCmdInput("");
+    setTab("chat");
+    sendChat(v);
+  };
+
+  if (!authReady) {
+    return <div className={"app" + (theme === "dark" ? " dark" : "")} />;
+  }
+  if (!session) {
+    return <SignIn theme={theme} />;
+  }
+
   return (
-    <div
-      style={{
-        display: "flex",
-        height: "100vh",
-        overflow: "hidden",
-        background: "#1a1a20",
-        color: "#f2efe9",
-        fontFamily: "'Geist','Inter',sans-serif",
-        fontSize: 14,
-      }}
-    >
+    <div className={"app" + (theme === "dark" ? " dark" : "")}>
       <div
         style={{
           position: "fixed",
@@ -1175,13 +1369,14 @@ Rough one. Dropped the deep work block and moved the call to tonight.
           <div
             key={t.id}
             style={{
-              background: "#2a2a34",
-              border: "1px solid rgba(142,174,251,0.3)",
-              borderRadius: 8,
-              padding: "8px 16px",
-              fontSize: 12,
-              color: "#8eaefb",
-              ...mono,
+              background: "var(--surface)",
+              border: "1px solid var(--accent-line)",
+              borderRadius: 10,
+              padding: "9px 16px",
+              fontSize: 12.5,
+              fontWeight: 550,
+              color: "var(--accent)",
+              boxShadow: "var(--shadow-md)",
               whiteSpace: "nowrap",
             }}
           >
@@ -1193,346 +1388,366 @@ Rough one. Dropped the deep work block and moved the call to tonight.
       {sidebarOpen && (
         <div
           onClick={() => setSidebarOpen(false)}
-          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 50 }}
+          style={{ position: "fixed", inset: 0, background: "rgba(16,18,26,0.38)", zIndex: 55 }}
         />
       )}
 
-      <div
-        style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          height: "100%",
-          width: 220,
-          background: "#22222a",
-          borderRight: "1px solid rgba(255,255,255,0.09)",
-          display: "flex",
-          flexDirection: "column",
-          zIndex: 60,
-          transform: sidebarOpen ? "translateX(0)" : "translateX(-100%)",
-          transition: "transform 0.22s ease",
-        }}
-      >
-        <div style={{ padding: "24px 20px 14px", display: "flex", justifyContent: "space-between" }}>
-          <div>
-            <div style={{ fontFamily: "Georgia,serif", fontSize: 21, fontStyle: "italic" }}>Locus</div>
-            <div style={{ fontSize: 11, color: "#706d68", marginTop: 3 }}>where focus lives</div>
-          </div>
-          <button
-            onClick={() => setSidebarOpen(false)}
-            style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 18 }}
-          >
+      <aside className={"sidebar" + (sidebarOpen ? " open" : "")}>
+        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "20px 18px 10px" }}>
+          <div
+            style={{
+              width: 24,
+              height: 24,
+              borderRadius: "50%",
+              border: "3.5px solid var(--text)",
+              flexShrink: 0,
+            }}
+          />
+          <div style={{ fontSize: 15.5, fontWeight: 750, letterSpacing: "0.16em" }}>LOCUS</div>
+          <button className="icon-btn mobile-only" style={{ marginLeft: "auto" }} onClick={() => setSidebarOpen(false)}>
             &times;
           </button>
         </div>
-        <nav style={{ padding: "0 10px", flex: 1, overflowY: "auto" }}>
-          {navSections.map((sec) => (
+
+        <nav className="scroll" style={{ flex: 1, padding: "6px 12px 12px" }}>
+          {NAV.map((sec) => (
             <div key={sec.title}>
-              <div
-                style={{
-                  fontSize: 9,
-                  ...mono,
-                  color: "#4a4a55",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.14em",
-                  padding: "12px 10px 4px",
-                }}
-              >
-                {sec.title}
-              </div>
+              <div className="nav-label">{sec.title}</div>
               {sec.items.map((item) => (
                 <button
                   key={item.id}
+                  className={"nav-item" + (tab === item.id ? " active" : "")}
                   onClick={() => {
                     setTab(item.id);
                     setSidebarOpen(false);
                   }}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 10,
-                    padding: "8px 10px",
-                    borderRadius: 7,
-                    cursor: "pointer",
-                    color: tab === item.id ? "#8eaefb" : "#b0aca6",
-                    background: tab === item.id ? "rgba(142,174,251,0.16)" : "none",
-                    border: "none",
-                    width: "100%",
-                    textAlign: "left",
-                    fontSize: 13,
-                    marginBottom: 1,
-                    fontWeight: tab === item.id ? 500 : 400,
-                  }}
                 >
+                  <span className="nav-icon"><Icon name={item.icon} /></span>
                   {item.label}
-                  {item.badge !== undefined && (
-                    <span
-                      style={{
-                        marginLeft: "auto",
-                        fontSize: 10,
-                        background: tab === item.id ? "rgba(142,174,251,0.28)" : "#32323e",
-                        color: tab === item.id ? "#8eaefb" : "#706d68",
-                        padding: "1px 6px",
-                        borderRadius: 99,
-                      }}
-                    >
-                      {item.badge}
-                    </span>
-                  )}
+                  {item.badge ? <span className="nav-badge">{item.badge}</span> : null}
                 </button>
               ))}
             </div>
           ))}
         </nav>
-        <div
-          style={{
-            padding: "14px 20px",
-            borderTop: "1px solid rgba(255,255,255,0.09)",
-            fontSize: 11,
-            color: "#706d68",
-            ...mono,
-          }}
-        >
-          <div>{now.toLocaleDateString("en-US", { weekday: "long" })}</div>
-          <div style={{ marginTop: 2, color: "#b0aca6" }}>
-            {now.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
-          </div>
-          <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
-            <button
-              onClick={() => {
-                if (
-                  window.confirm(
-                    "Clear learned stats, context notes, history, and archived plans? Your goals, tasks, habits, and ideas stay."
-                  )
-                ) {
-                  setSkipPatterns({});
-                  setTimestamps({});
-                  setContext([]);
-                  setHistory([]);
-                  setPlanArchive({});
-                  toast("Stats & history cleared");
-                }
-              }}
-              style={{
-                flex: 1,
-                background: "none",
-                border: "1px solid rgba(255,255,255,0.09)",
-                borderRadius: 6,
-                padding: "5px 6px",
-                fontSize: 9,
-                color: "#706d68",
-                cursor: "pointer",
-                ...mono,
-              }}
-            >
-              clear stats
-            </button>
-            <button
-              onClick={() => {
-                if (window.confirm("Erase ALL data and start completely fresh? This cannot be undone.")) {
-                  Object.values(KEYS).forEach((k) => localStorage.removeItem(k));
-                  window.location.reload();
-                }
-              }}
-              style={{
-                flex: 1,
-                background: "none",
-                border: "1px solid rgba(242,139,130,0.25)",
-                borderRadius: 6,
-                padding: "5px 6px",
-                fontSize: 9,
-                color: "#f28b82",
-                cursor: "pointer",
-                ...mono,
-              }}
-            >
-              reset all
-            </button>
-          </div>
 
-          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-            <button
-              onClick={sendToDevice}
-              style={{
-                flex: 1,
-                background: "none",
-                border: "1px solid rgba(255,255,255,0.09)",
-                borderRadius: 6,
-                padding: "5px 6px",
-                fontSize: 9,
-                color: "#706d68",
-                cursor: "pointer",
-                ...mono,
-              }}
-            >
-              send to device
-            </button>
-            <button
-              onClick={receiveFromDevice}
-              style={{
-                flex: 1,
-                background: "none",
-                border: "1px solid rgba(255,255,255,0.09)",
-                borderRadius: 6,
-                padding: "5px 6px",
-                fontSize: 9,
-                color: "#706d68",
-                cursor: "pointer",
-                ...mono,
-              }}
-            >
-              receive
-            </button>
-          </div>
-
-          {transferCode && (
-            <div
-              style={{
-                marginTop: 8,
-                padding: "8px 10px",
-                border: "1px solid rgba(142,174,251,0.28)",
-                borderRadius: 6,
-                background: "rgba(142,174,251,0.08)",
-              }}
-            >
-              <div style={{ fontSize: 9, color: "#706d68", ...mono }}>enter on your other device</div>
-              <div
-                style={{
-                  fontSize: 18,
-                  letterSpacing: 3,
-                  color: "#8eaefb",
-                  marginTop: 4,
-                  ...mono,
-                }}
-              >
-                {transferCode}
-              </div>
-              <div style={{ fontSize: 9, color: "#706d68", marginTop: 4, ...mono }}>expires in 15 min &middot; one use</div>
-            </div>
-          )}
-        </div>
-      </div>
-
-      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            padding: "12px 16px",
-            borderBottom: "1px solid rgba(255,255,255,0.09)",
-            flexShrink: 0,
-          }}
-        >
-          <button
-            onClick={() => setSidebarOpen(true)}
-            style={{ background: "none", border: "none", cursor: "pointer", color: "#b0aca6", fontSize: 20 }}
-          >
-            &#9776;
+        <div style={{ borderTop: "1px solid var(--border)", padding: "12px" }}>
+          <button className="nav-item" onClick={() => setSettingsOpen((o) => !o)}>
+            <span className="nav-icon"><Icon name="gear" /></span>
+            Settings
+            <span style={{ marginLeft: "auto", color: "var(--muted-2)", fontSize: 11 }}>{settingsOpen ? "–" : "+"}</span>
           </button>
-          <div style={{ fontFamily: "Georgia,serif", fontSize: 16, fontStyle: "italic" }}>
-            {allNav.find((n) => n.id === tab)?.label}
-          </div>
-        </div>
 
-        {tab === "today" && (
-          <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
-            <div style={{ padding: "16px 20px 14px", borderBottom: "1px solid rgba(255,255,255,0.09)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                <div>
-                  <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontStyle: "italic" }}>
-                    {now.toLocaleDateString("en-US", { weekday: "long" })}
-                  </div>
-                  <div style={{ fontSize: 11, color: "#706d68", marginTop: 3, ...mono }}>
-                    {now.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
-                  </div>
-                </div>
+          {settingsOpen && (
+            <div style={{ padding: "4px 4px 10px" }}>
+              <div style={{ display: "flex", gap: 6 }}>
                 <button
-                  onClick={() => generateToday(null)}
-                  disabled={planLoading}
-                  style={{ ...primaryBtn, opacity: planLoading ? 0.6 : 1 }}
-                >
-                  {planLoading ? "..." : "Add habits"}
-                </button>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
-                <div style={{ flex: 1, height: 3, background: "#32323e", borderRadius: 99, overflow: "hidden" }}>
-                  <div
-                    style={{
-                      height: "100%",
-                      width: progress + "%",
-                      background: "#8eaefb",
-                      borderRadius: 99,
-                      transition: "width 0.4s",
-                    }}
-                  />
-                </div>
-                <div style={{ fontSize: 11, ...mono, color: "#706d68" }}>
-                  {completedCount} / {todayPlan.length}
-                </div>
-              </div>
-            </div>
-            <div style={{ flex: 1, overflowY: "auto" }}>
-              {!todayPlan.length && (
-                <div
-                  style={{
-                    padding: "48px 24px",
-                    color: "#706d68",
-                    ...mono,
-                    fontSize: 12,
-                    textAlign: "center",
-                    lineHeight: 1.9,
+                  style={{ ...ghostBtn, flex: 1, fontSize: 10.5 }}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Clear learned stats, context notes, history, and archived plans? Your goals, tasks, habits, and ideas stay."
+                      )
+                    ) {
+                      setSkipPatterns({});
+                      setTimestamps({});
+                      setContext([]);
+                      setHistory([]);
+                      setPlanArchive({});
+                      toast("Stats & history cleared");
+                    }
                   }}
                 >
-                  {habits.length
-                    ? "Nothing on today yet. Add habits lays out your habits - everything else comes from the Tomorrow tab or Chat."
-                    : "Nothing on today yet. You have no habits, so there is nothing to lay out - plan the day in the Tomorrow tab, or add blocks through Chat."}
+                  clear stats
+                </button>
+                <button
+                  style={{ ...ghostBtn, flex: 1, fontSize: 10.5, color: "var(--red)", borderColor: "var(--red)" }}
+                  onClick={() => {
+                    if (window.confirm("Erase ALL data and start completely fresh? This cannot be undone.")) {
+                      Object.values(KEYS).forEach((k) => localStorage.removeItem(k));
+                      window.location.reload();
+                    }
+                  }}
+                >
+                  reset all
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                <button style={{ ...ghostBtn, flex: 1, fontSize: 10.5 }} onClick={sendToDevice}>
+                  send to device
+                </button>
+                <button style={{ ...ghostBtn, flex: 1, fontSize: 10.5 }} onClick={receiveFromDevice}>
+                  receive
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                <button
+                  style={{ ...ghostBtn, flex: 1, fontSize: 10.5 }}
+                  onClick={async () => {
+                    await supabase.auth.signOut();
+                    toast("Signed out");
+                  }}
+                >
+                  sign out
+                </button>
+              </div>
+              <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+                {session.user.email}
+                <br />
+                {syncNote || (syncReady ? "synced" : "connecting...")}
+              </div>
+              {transferCode && (
+                <div
+                  style={{
+                    marginTop: 8,
+                    padding: "8px 10px",
+                    border: "1px solid var(--accent-line)",
+                    borderRadius: 8,
+                    background: "var(--accent-soft)",
+                  }}
+                >
+                  <div style={{ fontSize: 9.5, color: "var(--muted)", ...mono }}>enter on your other device</div>
+                  <div style={{ fontSize: 18, letterSpacing: 3, color: "var(--accent)", marginTop: 4, ...mono }}>
+                    {transferCode}
+                  </div>
+                  <div style={{ fontSize: 9.5, color: "var(--muted)", marginTop: 4, ...mono }}>
+                    expires in 15 min &middot; one use
+                  </div>
                 </div>
               )}
-              {doneBlocks.map((b) => (
-                <PlanBlock
-                  key={b.id}
-                  block={b}
-                  onToggle={toggleBlock}
-                  onSkip={skipBlock}
-                  onReschedule={setRescheduleId}
-                  onStart={startBlock}
-                  skipCount={skipPatterns[b.title] || 0}
-                />
-              ))}
-              {doneBlocks.length > 0 && openBlocks.length > 0 && (
-                <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "7px 16px 7px 48px" }}>
-                  <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" }} />
-                  <div style={sectionLabel}>Now</div>
-                  <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" }} />
+            </div>
+          )}
+
+          <div
+            onClick={() => {
+              const n = window.prompt("What should Locus call you?", userName);
+              if (n !== null) setUserName(n.trim());
+            }}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "9px 10px",
+              marginTop: 4,
+              borderRadius: 10,
+              cursor: "pointer",
+            }}
+          >
+            <div
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: "50%",
+                background: "var(--accent-soft)",
+                color: "var(--accent)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 12.5,
+                fontWeight: 700,
+                flexShrink: 0,
+              }}
+            >
+              {(userName || "?").slice(0, 1).toUpperCase()}
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {userName || "Add your name"}
+              </div>
+              <div style={{ fontSize: 11, color: "var(--muted)" }}>
+                {now.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <div className="main">
+        <header className="topbar">
+          <button className="icon-btn mobile-only" onClick={() => setSidebarOpen(true)}>
+            <Icon name="menu" />
+          </button>
+          <div className="topbar-title">
+            {tab === "today" ? (
+              <>
+                <div className="greet">{greeting}</div>
+                <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 5 }}>
+                  {now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
                 </div>
-              )}
-              {openBlocks.map((b) => (
-                <PlanBlock
-                  key={b.id}
-                  block={b}
-                  onToggle={toggleBlock}
-                  onSkip={skipBlock}
-                  onReschedule={setRescheduleId}
-                  onStart={startBlock}
-                  skipCount={skipPatterns[b.title] || 0}
-                />
-              ))}
+              </>
+            ) : (
+              <div className="greet" style={{ paddingTop: 3 }}>{ALL_NAV.find((n) => n.id === tab)?.label}</div>
+            )}
+          </div>
+
+          <div className="cmd">
+            <span style={{ color: "var(--accent)", display: "flex" }}><Icon name="sparkle" size={17} /></span>
+            <input
+              ref={cmdRef}
+              className="bare"
+              value={cmdInput}
+              onChange={(e) => setCmdInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && runCommand()}
+              placeholder="What do you want to accomplish?"
+            />
+            <span className="kbd">&#8984;K</span>
+            <button
+              onClick={() => setTaskModal({ name: "", due: "", goal: "", imp: 2, done: false })}
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 9,
+                border: "none",
+                background: "var(--accent)",
+                color: "var(--on-accent)",
+                fontSize: 17,
+                lineHeight: 1,
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              +
+            </button>
+          </div>
+
+          <button
+            className="icon-btn topbar-theme"
+            title="Toggle theme"
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+          >
+            <Icon name={theme === "dark" ? "moon" : "sun"} />
+          </button>
+        </header>
+
+        {tab === "today" && (
+          <div className="scroll" style={{ flex: 1 }}>
+            <div className="today-grid">
+              <div style={{ display: "flex", flexDirection: "column", gap: 18, minWidth: 0 }}>
+                <div className="card">
+                  <div className="card-head">
+                    <div className="card-title">Today</div>
+                    <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
+                      <div className="bar" style={{ width: 96 }}>
+                        <div style={{ width: progress + "%", background: "var(--accent)" }} />
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+                        {completedCount}/{todayPlan.length}
+                      </div>
+                      <button className="btn" onClick={() => generateToday(null)} disabled={planLoading}>
+                        {planLoading ? "…" : "Add habits"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {!todayPlan.length && (
+                    <div
+                      style={{
+                        padding: "44px 26px 48px",
+                        color: "var(--muted)",
+                        fontSize: 13,
+                        textAlign: "center",
+                        lineHeight: 1.8,
+                        borderTop: "1px solid var(--border)",
+                      }}
+                    >
+                      {habits.length
+                        ? "Nothing on today yet. Add habits lays out your habits — everything else comes from Plan or Chat."
+                        : "Nothing on today yet. You have no habits, so there's nothing to lay out — plan the day under Plan, or add blocks through Chat."}
+                    </div>
+                  )}
+
+                  {doneBlocks.map((b) => (
+                    <PlanBlock
+                      key={b.id}
+                      block={b}
+                      cat={catOf(b)}
+                      tint={tint}
+                      onToggle={toggleBlock}
+                      onSkip={skipBlock}
+                      onReschedule={setRescheduleId}
+                      onStart={startBlock}
+                      skipCount={skipPatterns[b.title] || 0}
+                    />
+                  ))}
+
+                  {doneBlocks.length > 0 && openBlocks.length > 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 12,
+                        padding: "10px 18px",
+                        borderTop: "1px solid var(--border)",
+                      }}
+                    >
+                      <div style={sectionLabel}>Now</div>
+                      <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+                    </div>
+                  )}
+
+                  {openBlocks.map((b) => (
+                    <PlanBlock
+                      key={b.id}
+                      block={b}
+                      cat={catOf(b)}
+                      tint={tint}
+                      onToggle={toggleBlock}
+                      onSkip={skipBlock}
+                      onReschedule={setRescheduleId}
+                      onStart={startBlock}
+                      skipCount={skipPatterns[b.title] || 0}
+                    />
+                  ))}
+                </div>
+
+                <div className="card" style={{ padding: "16px 18px 18px" }}>
+                  <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+                    <div className="row-icon" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
+                      <Icon name="refresh" size={15} />
+                    </div>
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ fontSize: 14, fontWeight: 650 }}>Adaptive replanning</div>
+                        <span className="pill" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
+                          BETA
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
+                        Something came up? Let Locus adjust your plan.
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+                    {REPLAN.map((r) => (
+                      <button
+                        key={r.label}
+                        className={"chip" + (r.accent ? " chip-accent" : "")}
+                        onClick={() => {
+                          setTab("chat");
+                          if (r.msg) sendChat(r.msg);
+                          else cmdRef.current?.focus();
+                        }}
+                      >
+                        {r.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
-
         {tab === "tomorrow" && (
           <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
             {/* --- header: date, planned-state, segment switch --- */}
             <div style={{ padding: "14px 20px 0", flexShrink: 0 }}>
-              <div style={{ fontFamily: "Georgia,serif", fontSize: 22, fontStyle: "italic", lineHeight: 1.15 }}>
+              <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.4px", lineHeight: 1.15 }}>
                 {tomorrowDate.toLocaleDateString("en-US", { weekday: "long" })}
               </div>
               <div style={{ ...sectionLabel, marginTop: 5 }}>
                 {tomorrowDate.toLocaleDateString("en-US", { month: "long", day: "numeric" })}
                 {" · "}
-                <span style={{ color: tomorrowPlan.length ? "#8eaefb" : "#706d68" }}>
+                <span style={{ color: tomorrowPlan.length ? "var(--accent)" : "var(--muted)" }}>
                   {tomorrowPlan.length
                     ? tomorrowPlan.length + " block" + (tomorrowPlan.length === 1 ? "" : "s") + " planned"
                     : "not planned yet"}
@@ -1542,8 +1757,8 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 style={{
                   display: "flex",
                   gap: 4,
-                  background: "#22222a",
-                  border: "1px solid rgba(255,255,255,0.09)",
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
                   borderRadius: 9,
                   padding: 3,
                   marginTop: 13,
@@ -1558,7 +1773,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     onClick={() => setTmrView(v.id)}
                     style={{
                       flex: 1,
-                      background: tmrView === v.id ? "rgba(142,174,251,0.16)" : "none",
+                      background: tmrView === v.id ? "var(--accent-soft)" : "none",
                       border: "none",
                       borderRadius: 6,
                       padding: "7px 0",
@@ -1566,14 +1781,14 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       ...mono,
                       fontSize: 11,
                       letterSpacing: "0.06em",
-                      color: tmrView === v.id ? "#8eaefb" : "#706d68",
+                      color: tmrView === v.id ? "var(--accent)" : "var(--muted)",
                     }}
                   >
                     {v.label}
                     <span
                       style={{
                         marginLeft: 5,
-                        color: tmrView === v.id ? "#8eaefb" : "#4a4a55",
+                        color: tmrView === v.id ? "var(--accent)" : "var(--muted-2)",
                         opacity: tmrView === v.id ? 0.75 : 1,
                       }}
                     >
@@ -1605,7 +1820,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                   {!tomorrowSuggestions.length && (
                     <div
                       style={{
-                        color: "#706d68",
+                        color: "var(--muted)",
                         fontSize: 12,
                         ...mono,
                         textAlign: "center",
@@ -1630,8 +1845,8 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                           )
                         }
                         style={{
-                          background: sel ? "rgba(142,174,251,0.1)" : "#22222a",
-                          border: `1px solid ${sel ? "rgba(142,174,251,0.4)" : "rgba(255,255,255,0.09)"}`,
+                          background: sel ? "var(--accent-soft)" : "var(--surface)",
+                          border: `1px solid ${sel ? "var(--accent-line)" : "var(--border)"}`,
                           borderRadius: 10,
                           padding: "11px 13px",
                           marginBottom: 7,
@@ -1646,16 +1861,16 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                             width: 8,
                             height: 8,
                             borderRadius: "50%",
-                            background: SUG_COLORS[sug.type] || "#706d68",
+                            background: SUG_COLORS[sug.type] || "var(--muted)",
                             flexShrink: 0,
                             marginTop: 5,
                           }}
                         />
                         <div style={{ flex: 1 }}>
                           <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 2 }}>{sug.title}</div>
-                          <div style={{ fontSize: 12, color: "#b0aca6", lineHeight: 1.5 }}>{sug.desc}</div>
+                          <div style={{ fontSize: 12, color: "var(--text-2)", lineHeight: 1.5 }}>{sug.desc}</div>
                         </div>
-                        {sel && <div style={{ color: "#8eaefb", fontSize: 14 }}>&#10003;</div>}
+                        {sel && <div style={{ color: "var(--accent)", fontSize: 14 }}>&#10003;</div>}
                       </div>
                     );
                   })}
@@ -1665,7 +1880,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                   {!tomorrowPlan.length && (
                     <div
                       style={{
-                        color: "#706d68",
+                        color: "var(--muted)",
                         fontSize: 12,
                         ...mono,
                         textAlign: "center",
@@ -1688,18 +1903,18 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                         }}
                       >
                         <div style={sectionLabel}>{g.label}</div>
-                        <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.09)" }} />
+                        <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
                       </div>
                       {g.blocks.map((b) => (
                         <div key={b.id} style={{ ...card, padding: "11px 13px", marginBottom: 7 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-                            {b.duration && <div style={{ fontSize: 10, ...mono, color: "#706d68" }}>{b.duration}</div>}
+                            {b.duration && <div style={{ fontSize: 10, ...mono, color: "var(--muted)" }}>{b.duration}</div>}
                             <div style={{ marginLeft: "auto" }}>
                               <ImpDots imp={b.imp} />
                             </div>
                           </div>
                           <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 2 }}>{b.title}</div>
-                          <div style={{ fontSize: 12, color: "#b0aca6", lineHeight: 1.5 }}>{b.desc}</div>
+                          <div style={{ fontSize: 12, color: "var(--text-2)", lineHeight: 1.5 }}>{b.desc}</div>
                         </div>
                       ))}
                     </div>
@@ -1712,7 +1927,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
             <div
               style={{
                 flexShrink: 0,
-                borderTop: "1px solid rgba(255,255,255,0.09)",
+                borderTop: "1px solid var(--border)",
                 padding: "10px 20px 16px",
               }}
             >
@@ -1722,9 +1937,9 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     <div
                       key={sTitle}
                       style={{
-                        background: "rgba(142,174,251,0.13)",
-                        border: "1px solid rgba(142,174,251,0.3)",
-                        color: "#8eaefb",
+                        background: "var(--accent-soft)",
+                        border: "1px solid var(--accent-line)",
+                        color: "var(--accent)",
                         borderRadius: 99,
                         padding: "4px 8px 4px 10px",
                         fontSize: 11,
@@ -1737,7 +1952,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       {sTitle}
                       <span
                         onClick={() => setSelectedSuggestions((prev) => prev.filter((x) => x !== sTitle))}
-                        style={{ color: "rgba(142,174,251,0.6)", cursor: "pointer" }}
+                        style={{ color: "var(--accent)", cursor: "pointer" }}
                       >
                         &times;
                       </span>
@@ -1767,17 +1982,17 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                         fontSize: 13,
                         lineHeight: 1.55,
                         alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                        background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#2a2a34",
+                        background: m.role === "user" ? "var(--accent-soft)" : "var(--surface-2)",
                         border:
                           m.role === "user"
-                            ? "1px solid rgba(142,174,251,0.28)"
-                            : "1px solid rgba(255,255,255,0.09)",
+                            ? "1px solid var(--accent-line)"
+                            : "1px solid var(--border)",
                       }}
                     >
                       {m.content}
                     </div>
                   ))}
-                  {tmrLoading && <div style={{ fontSize: 12, color: "#706d68", ...mono }}>thinking...</div>}
+                  {tmrLoading && <div style={{ fontSize: 12, color: "var(--muted)", ...mono }}>thinking...</div>}
                   <div ref={tmrEndRef} />
                 </div>
               )}
@@ -1796,11 +2011,11 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                   onClick={sendTomorrowChat}
                   disabled={tmrLoading}
                   style={{
-                    background: "rgba(142,174,251,0.16)",
-                    border: "1px solid rgba(142,174,251,0.28)",
+                    background: "var(--accent-soft)",
+                    border: "1px solid var(--accent-line)",
                     borderRadius: 8,
                     padding: "0 13px",
-                    color: "#8eaefb",
+                    color: "var(--accent)",
                     fontSize: 12,
                     fontWeight: 500,
                     cursor: "pointer",
@@ -1819,10 +2034,10 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                         width: "100%",
                         marginTop: 8,
                         background: "none",
-                        border: "1px solid rgba(255,255,255,0.09)",
+                        border: "1px solid var(--border)",
                         borderRadius: 8,
                         padding: "10px 0",
-                        color: "#706d68",
+                        color: "var(--muted)",
                         ...mono,
                         fontSize: 11.5,
                         cursor: "pointer",
@@ -1851,26 +2066,26 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 onClick={() => setCalMonth(new Date(calY, calM - 1, 1))}
                 style={{
                   background: "none",
-                  border: "1px solid rgba(255,255,255,0.09)",
+                  border: "1px solid var(--border)",
                   borderRadius: 6,
                   padding: "5px 12px",
-                  color: "#b0aca6",
+                  color: "var(--text-2)",
                   cursor: "pointer",
                 }}
               >
                 &lsaquo;
               </button>
-              <div style={{ fontFamily: "Georgia,serif", fontSize: 17, fontStyle: "italic" }}>
+              <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.4px" }}>
                 {calMonth.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
               </div>
               <button
                 onClick={() => setCalMonth(new Date(calY, calM + 1, 1))}
                 style={{
                   background: "none",
-                  border: "1px solid rgba(255,255,255,0.09)",
+                  border: "1px solid var(--border)",
                   borderRadius: 6,
                   padding: "5px 12px",
-                  color: "#b0aca6",
+                  color: "var(--text-2)",
                   cursor: "pointer",
                 }}
               >
@@ -1880,7 +2095,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 4, marginBottom: 6 }}>
               {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => (
-                <div key={i} style={{ textAlign: "center", fontSize: 10, ...mono, color: "#4a4a55" }}>
+                <div key={i} style={{ textAlign: "center", fontSize: 10, ...mono, color: "var(--muted-2)" }}>
                   {d}
                 </div>
               ))}
@@ -1909,25 +2124,25 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       gap: 2,
                       borderRadius: 8,
                       cursor: "pointer",
-                      background: isSel ? "rgba(142,174,251,0.16)" : isToday ? "#2a2a34" : "none",
+                      background: isSel ? "var(--accent-soft)" : isToday ? "var(--surface-2)" : "none",
                       border: isSel
-                        ? "1px solid rgba(142,174,251,0.4)"
+                        ? "1px solid var(--accent-line)"
                         : isToday
-                        ? "1px solid rgba(255,255,255,0.14)"
+                        ? "1px solid var(--border-strong)"
                         : "1px solid transparent",
                     }}
                   >
                     <div
                       style={{
                         fontSize: 12,
-                        color: isSel ? "#8eaefb" : isToday ? "#f2efe9" : "#706d68",
+                        color: isSel ? "var(--accent)" : isToday ? "var(--text)" : "var(--muted)",
                         fontWeight: isToday || isSel ? 500 : 400,
                       }}
                     >
                       {day}
                     </div>
                     {has && (
-                      <div style={{ width: 4, height: 4, borderRadius: "50%", background: isSel ? "#8eaefb" : "#4a4a55" }} />
+                      <div style={{ width: 4, height: 4, borderRadius: "50%", background: isSel ? "var(--accent)" : "var(--muted-2)" }} />
                     )}
                   </div>
                 );
@@ -1940,7 +2155,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
             </div>
 
             {!selectedPlan.length && !selectedHistory && (
-              <div style={{ color: "#706d68", fontSize: 12, ...mono, padding: "12px 0" }}>
+              <div style={{ color: "var(--muted)", fontSize: 12, ...mono, padding: "12px 0" }}>
                 nothing recorded for this day
               </div>
             )}
@@ -1956,12 +2171,12 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 }}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-                  <div style={{ fontSize: 11, ...mono, color: "#8eaefb" }}>{b.time}</div>
-                  {b.duration && <div style={{ fontSize: 10, ...mono, color: "#706d68" }}>{b.duration}</div>}
+                  <div style={{ fontSize: 11, ...mono, color: "var(--accent)" }}>{b.time}</div>
+                  {b.duration && <div style={{ fontSize: 10, ...mono, color: "var(--muted)" }}>{b.duration}</div>}
                   <ImpDots imp={b.imp} />
-                  {b.done && <span style={{ marginLeft: "auto", fontSize: 10, ...mono, color: "#81c995" }}>done</span>}
+                  {b.done && <span style={{ marginLeft: "auto", fontSize: 10, ...mono, color: "var(--green)" }}>done</span>}
                   {b.status === "skipped" && (
-                    <span style={{ marginLeft: "auto", fontSize: 10, ...mono, color: "#706d68" }}>skipped</span>
+                    <span style={{ marginLeft: "auto", fontSize: 10, ...mono, color: "var(--muted)" }}>skipped</span>
                   )}
                 </div>
                 <div
@@ -1973,7 +2188,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 >
                   {b.title}
                 </div>
-                <div style={{ fontSize: 12, color: "#b0aca6", lineHeight: 1.5, marginTop: 2 }}>{b.desc}</div>
+                <div style={{ fontSize: 12, color: "var(--text-2)", lineHeight: 1.5, marginTop: 2 }}>{b.desc}</div>
               </div>
             ))}
 
@@ -1981,12 +2196,12 @@ Rough one. Dropped the deep work block and moved the call to tonight.
               <div style={{ marginTop: 14 }}>
                 <div style={{ ...sectionLabel, marginBottom: 6 }}>Activity</div>
                 {selectedHistory.entries.map((e, i) => (
-                  <div key={i} style={{ display: "flex", gap: 8, padding: "5px 0", fontSize: 12, color: "#b0aca6" }}>
-                    <span style={{ color: e.type === "task" ? "#81c995" : e.type === "habit" ? "#edbe80" : "#706d68" }}>
+                  <div key={i} style={{ display: "flex", gap: 8, padding: "5px 0", fontSize: 12, color: "var(--text-2)" }}>
+                    <span style={{ color: e.type === "task" ? "var(--green)" : e.type === "habit" ? "var(--amber)" : "var(--muted)" }}>
                       &bull;
                     </span>
                     <span style={{ flex: 1 }}>{e.text}</span>
-                    {e.time && <span style={{ fontSize: 10, ...mono, color: "#4a4a55" }}>{e.time}</span>}
+                    {e.time && <span style={{ fontSize: 10, ...mono, color: "var(--muted-2)" }}>{e.time}</span>}
                   </div>
                 ))}
               </div>
@@ -2013,8 +2228,8 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                   borderRadius: 12,
                   fontSize: 13,
                   lineHeight: 1.65,
-                  background: "#22222a",
-                  border: "1px solid rgba(255,255,255,0.09)",
+                  background: "var(--surface)",
+                  border: "1px solid var(--border)",
                   alignSelf: "flex-start",
                 }}
               >
@@ -2032,18 +2247,18 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     lineHeight: 1.65,
                     whiteSpace: "pre-wrap",
                     alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                    background: m.role === "user" ? "rgba(142,174,251,0.16)" : "#22222a",
-                    border: m.role === "user" ? "1px solid rgba(142,174,251,0.28)" : "1px solid rgba(255,255,255,0.09)",
+                    background: m.role === "user" ? "var(--accent-soft)" : "var(--surface)",
+                    border: m.role === "user" ? "1px solid var(--accent-line)" : "1px solid var(--border)",
                   }}
                 >
                   {m.content}
                 </div>
               ))}
-              {chatLoading && <div style={{ fontSize: 12, color: "#706d68", ...mono }}>thinking...</div>}
+              {chatLoading && <div style={{ fontSize: 12, color: "var(--muted)", ...mono }}>thinking...</div>}
               <div ref={chatEndRef} />
             </div>
             <div
-              style={{ display: "flex", gap: 8, padding: "12px 20px 20px", borderTop: "1px solid rgba(255,255,255,0.09)" }}
+              style={{ display: "flex", gap: 8, padding: "12px 20px 20px", borderTop: "1px solid var(--border)" }}
             >
               <input
                 value={chatInput}
@@ -2056,11 +2271,11 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 onClick={sendChat}
                 disabled={chatLoading}
                 style={{
-                  background: "rgba(142,174,251,0.16)",
-                  border: "1px solid rgba(142,174,251,0.28)",
+                  background: "var(--accent-soft)",
+                  border: "1px solid var(--accent-line)",
                   borderRadius: 7,
                   padding: "10px 16px",
-                  color: "#8eaefb",
+                  color: "var(--accent)",
                   fontSize: 12,
                   fontWeight: 500,
                   cursor: "pointer",
@@ -2077,7 +2292,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
             <div
               style={{
                 padding: "14px 20px",
-                borderBottom: "1px solid rgba(255,255,255,0.09)",
+                borderBottom: "1px solid var(--border)",
                 display: "flex",
                 justifyContent: "flex-end",
               }}
@@ -2091,7 +2306,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
             </div>
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               {!goals.length && (
-                <div style={{ color: "#706d68", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
+                <div style={{ color: "var(--muted)", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
                   no goals yet
                 </div>
               )}
@@ -2103,7 +2318,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     onClick={() => setGoalModal(g)}
                     style={{
                       ...card,
-                      borderLeft: `3px solid ${g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68"}`,
+                      borderLeft: `3px solid ${g.p === "front" ? "var(--accent)" : g.p === "maint" ? "var(--violet)" : "var(--muted)"}`,
                       padding: "14px 16px",
                       marginBottom: 10,
                       cursor: "pointer",
@@ -2115,8 +2330,8 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                         style={{
                           fontSize: 10,
                           ...mono,
-                          color: "#706d68",
-                          background: "#32323e",
+                          color: "var(--muted)",
+                          background: "var(--chip)",
                           padding: "3px 8px",
                           borderRadius: 99,
                           marginLeft: 8,
@@ -2126,19 +2341,19 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                         {g.area}
                       </div>
                     </div>
-                    {g.desc && <div style={{ fontSize: 12.5, color: "#b0aca6", marginTop: 6, lineHeight: 1.6 }}>{g.desc}</div>}
+                    {g.desc && <div style={{ fontSize: 12.5, color: "var(--text-2)", marginTop: 6, lineHeight: 1.6 }}>{g.desc}</div>}
                     <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 10 }}>
                       <div
                         style={{
                           fontSize: 11,
                           ...mono,
-                          color: g.p === "front" ? "#8eaefb" : g.p === "maint" ? "#b8a0fc" : "#706d68",
+                          color: g.p === "front" ? "var(--accent)" : g.p === "maint" ? "var(--violet)" : "var(--muted)",
                         }}
                       >
                         {g.p === "front" ? "front burner" : g.p === "maint" ? "maintenance" : "back burner"}
                       </div>
                       {g.deadline && (
-                        <div style={{ fontSize: 11, ...mono, color: "#706d68", marginLeft: "auto" }}>{g.deadline}</div>
+                        <div style={{ fontSize: 11, ...mono, color: "var(--muted)", marginLeft: "auto" }}>{g.deadline}</div>
                       )}
                       <button
                         onClick={(e) => {
@@ -2150,7 +2365,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                           background: "none",
                           border: "none",
                           cursor: "pointer",
-                          color: "#706d68",
+                          color: "var(--muted)",
                           marginLeft: g.deadline ? 0 : "auto",
                           fontSize: 12,
                         }}
@@ -2169,7 +2384,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
             <div
               style={{
                 padding: "14px 20px",
-                borderBottom: "1px solid rgba(255,255,255,0.09)",
+                borderBottom: "1px solid var(--border)",
                 display: "flex",
                 justifyContent: "flex-end",
               }}
@@ -2193,7 +2408,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                   />
                 ))}
               {!tasks.filter((t) => !t.done).length && (
-                <div style={{ color: "#706d68", fontSize: 12, ...mono, padding: "12px 0" }}>no pending tasks</div>
+                <div style={{ color: "var(--muted)", fontSize: 12, ...mono, padding: "12px 0" }}>no pending tasks</div>
               )}
               {tasks.some((t) => t.done) && (
                 <>
@@ -2220,7 +2435,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
             <div
               style={{
                 padding: "14px 20px",
-                borderBottom: "1px solid rgba(255,255,255,0.09)",
+                borderBottom: "1px solid var(--border)",
                 display: "flex",
                 justifyContent: "flex-end",
               }}
@@ -2232,20 +2447,20 @@ Rough one. Dropped the deep work block and moved the call to tonight.
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
               <div
                 style={{
-                  background: "#2a2a34",
+                  background: "var(--surface-2)",
                   borderRadius: 7,
                   padding: "10px 14px",
                   fontSize: 11,
-                  color: "#706d68",
+                  color: "var(--muted)",
                   lineHeight: 1.6,
                   marginBottom: 14,
-                  borderLeft: "3px solid rgba(237,190,128,0.3)",
+                  borderLeft: "3px solid var(--amber)",
                 }}
               >
                 These shape how Claude builds your plan. Any frequency works - daily, 3x a week, every other week.
               </div>
               {!habits.length && (
-                <div style={{ color: "#706d68", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
+                <div style={{ color: "var(--muted)", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
                   no habits yet
                 </div>
               )}
@@ -2261,15 +2476,15 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                         style={{
                           fontSize: 10,
                           ...mono,
-                          color: "#706d68",
-                          background: "#32323e",
+                          color: "var(--muted)",
+                          background: "var(--chip)",
                           padding: "2px 7px",
                           borderRadius: 99,
                         }}
                       >
                         {h.freq || "custom"}
                       </span>
-                      {h.note && <span style={{ fontSize: 11, color: "#706d68", ...mono }}>{h.note}</span>}
+                      {h.note && <span style={{ fontSize: 11, color: "var(--muted)", ...mono }}>{h.note}</span>}
                     </div>
                     <div style={{ display: "flex", gap: 3, marginTop: 7 }}>
                       {(h.week || [0, 0, 0, 0, 0, 0, 0]).map((d, i) => (
@@ -2279,26 +2494,26 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                             width: 7,
                             height: 7,
                             borderRadius: "50%",
-                            background: i === 6 && h.tickedToday ? "#81c995" : d ? "#edbe80" : "#32323e",
+                            background: i === 6 && h.tickedToday ? "var(--green)" : d ? "var(--amber)" : "var(--chip)",
                           }}
                         />
                       ))}
                     </div>
                   </div>
-                  {h.streak > 0 && <div style={{ fontSize: 11, ...mono, color: "#edbe80" }}>{h.streak}d</div>}
+                  {h.streak > 0 && <div style={{ fontSize: 11, ...mono, color: "var(--amber)" }}>{h.streak}d</div>}
                   <div
                     onClick={() => tickHabit(h.id)}
                     style={{
                       width: 28,
                       height: 28,
-                      border: `1.5px solid ${h.tickedToday ? "#81c995" : "rgba(255,255,255,0.22)"}`,
+                      border: `1.5px solid ${h.tickedToday ? "var(--green)" : "var(--border-strong)"}`,
                       borderRadius: 8,
                       cursor: "pointer",
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "center",
-                      background: h.tickedToday ? "rgba(129,201,149,0.12)" : "none",
-                      color: "#81c995",
+                      background: h.tickedToday ? "rgba(31,158,106,0.12)" : "none",
+                      color: "var(--green)",
                       fontSize: 13,
                       flexShrink: 0,
                     }}
@@ -2310,7 +2525,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       setHabits((prev) => prev.filter((x) => x.id !== h.id));
                       toast("Deleted habit");
                     }}
-                    style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}
+                    style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12 }}
                   >
                     &times;
                   </button>
@@ -2350,7 +2565,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
               </button>
             </div>
             {!ideas.length && (
-              <div style={{ color: "#706d68", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
+              <div style={{ color: "var(--muted)", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
                 nothing parked here yet
               </div>
             )}
@@ -2359,8 +2574,8 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 key={i.id}
                 style={{ ...card, padding: "11px 15px", marginBottom: 7, display: "flex", alignItems: "center", gap: 10 }}
               >
-                <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#b8a0fc", opacity: 0.8, flexShrink: 0 }} />
-                <div style={{ flex: 1, fontSize: 13, color: "#b0aca6" }}>{i.t}</div>
+                <div style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--violet)", opacity: 0.8, flexShrink: 0 }} />
+                <div style={{ flex: 1, fontSize: 13, color: "var(--text-2)" }}>{i.t}</div>
                 <button
                   onClick={() => {
                     setChatInput("Promote this idea to a goal: " + i.t);
@@ -2371,9 +2586,9 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     ...mono,
                     padding: "3px 8px",
                     borderRadius: 5,
-                    border: "1px solid rgba(184,160,252,0.3)",
+                    border: "1px solid var(--accent-line)",
                     background: "none",
-                    color: "#b8a0fc",
+                    color: "var(--violet)",
                     cursor: "pointer",
                     flexShrink: 0,
                   }}
@@ -2382,7 +2597,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 </button>
                 <button
                   onClick={() => setIdeas((prev) => prev.filter((x) => x.id !== i.id))}
-                  style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}
+                  style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12 }}
                 >
                   &times;
                 </button>
@@ -2394,7 +2609,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
         {tab === "history" && (
           <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
             {!history.length && (
-              <div style={{ color: "#706d68", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
+              <div style={{ color: "var(--muted)", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
                 no history yet
               </div>
             )}
@@ -2404,12 +2619,12 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 {day.entries.map((e, ei) => {
                   const color =
                     e.type === "task"
-                      ? "#8eaefb"
+                      ? "var(--accent)"
                       : e.type === "habit"
-                      ? "#edbe80"
+                      ? "var(--amber)"
                       : e.type === "reschedule"
-                      ? "#f0c060"
-                      : "#706d68";
+                      ? "var(--amber)"
+                      : "var(--muted)";
                   return (
                     <div
                       key={ei}
@@ -2424,8 +2639,8 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       }}
                     >
                       <div style={{ width: 6, height: 6, borderRadius: "50%", background: color, flexShrink: 0 }} />
-                      <div style={{ flex: 1, fontSize: 12.5, color: "#b0aca6" }}>{e.text}</div>
-                      {e.time && <div style={{ fontSize: 10, ...mono, color: "#706d68" }}>{e.time}</div>}
+                      <div style={{ flex: 1, fontSize: 12.5, color: "var(--text-2)" }}>{e.text}</div>
+                      {e.time && <div style={{ fontSize: 10, ...mono, color: "var(--muted)" }}>{e.time}</div>}
                     </div>
                   );
                 })}
@@ -2480,10 +2695,10 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     padding: "8px 4px",
                     fontSize: 11,
                     ...mono,
-                    border: `1px solid ${goalModal.p === val ? "#8eaefb" : "rgba(255,255,255,0.09)"}`,
+                    border: `1px solid ${goalModal.p === val ? "var(--accent)" : "var(--border)"}`,
                     borderRadius: 7,
-                    background: goalModal.p === val ? "rgba(142,174,251,0.16)" : "none",
-                    color: goalModal.p === val ? "#8eaefb" : "#706d68",
+                    background: goalModal.p === val ? "var(--accent-soft)" : "none",
+                    color: goalModal.p === val ? "var(--accent)" : "var(--muted)",
                     cursor: "pointer",
                   }}
                 >
@@ -2551,10 +2766,10 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     padding: "8px 6px",
                     fontSize: 11,
                     ...mono,
-                    border: `1px solid ${taskModal.imp === val ? "#8eaefb" : "rgba(255,255,255,0.09)"}`,
+                    border: `1px solid ${taskModal.imp === val ? "var(--accent)" : "var(--border)"}`,
                     borderRadius: 7,
-                    background: taskModal.imp === val ? "rgba(142,174,251,0.16)" : "none",
-                    color: taskModal.imp === val ? "#8eaefb" : "#706d68",
+                    background: taskModal.imp === val ? "var(--accent-soft)" : "none",
+                    color: taskModal.imp === val ? "var(--accent)" : "var(--muted)",
                     cursor: "pointer",
                   }}
                 >
@@ -2646,7 +2861,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
               placeholder="tonight / tomorrow morning"
             />
           </Field>
-          <div style={{ fontSize: 11, color: "#706d68", ...mono, marginTop: 4 }}>
+          <div style={{ fontSize: 11, color: "var(--muted)", ...mono, marginTop: 4 }}>
             Claude remembers this and adjusts future plans.
           </div>
           <ModalActions onCancel={() => setRescheduleId(null)} onSave={confirmReschedule} saveLabel="Got it" />
@@ -2656,306 +2871,209 @@ Rough one. Dropped the deep work block and moved the call to tonight.
   );
 }
 
-function PlanBlock({ block, onToggle, onSkip, onReschedule, onStart, skipCount }) {
+
+function PlanBlock({ block, cat, tint, onToggle, onSkip, onReschedule, onStart, skipCount }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [skipInput, setSkipInput] = useState("");
   const [showSkip, setShowSkip] = useState(false);
   const skipped = block.status === "skipped";
   const moved = block.status === "rescheduled";
-  const mono = { fontFamily: "monospace" };
+  const dim = block.done || skipped;
+  const c = cat || { label: "Focus", icon: "dot", color: "var(--accent)" };
+  const shade = tint || ((x) => x);
+
+  const badges = [];
+  if (skipped) badges.push({ text: "skipped" + (block.skipReason ? " · " + block.skipReason : ""), color: "var(--muted)" });
+  if (moved && !block.done) badges.push({ text: "moved" + (block.newTime ? " → " + block.newTime : ""), color: "var(--amber)" });
+  if (skipCount >= 2 && !block.done && !skipped) badges.push({ text: "skipped " + skipCount + "x recently", color: "var(--red)" });
 
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "flex-start",
-        borderBottom: "1px solid rgba(255,255,255,0.09)",
-        opacity: block.done || skipped ? 0.32 : 1,
-      }}
-    >
-      <div style={{ width: 48, flexShrink: 0, display: "flex", justifyContent: "center", paddingTop: 18 }}>
-        <div
-          onClick={() => {
-            if (skipped) return;
-            onStart(block.id);
-            onToggle(block.id);
-          }}
-          style={{
-            width: 18,
-            height: 18,
-            border: `1.5px solid ${block.done ? "#81c995" : "rgba(255,255,255,0.22)"}`,
-            borderRadius: "50%",
-            cursor: skipped ? "default" : "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: block.done ? "#81c995" : "none",
-          }}
-        >
-          {block.done && (
-            <div
-              style={{
-                width: 8,
-                height: 5,
-                borderLeft: "2px solid #0e1a11",
-                borderBottom: "2px solid #0e1a11",
-                transform: "rotate(-45deg) translateY(-1px)",
-              }}
-            />
+    <div className="row" style={{ opacity: dim ? 0.5 : 1 }}>
+      <div className="row-time">{block.time}</div>
+      <span className="row-dot" style={{ background: c.color }} />
+      <div className="row-icon" style={{ background: shade(c.color, 12), color: c.color }}>
+        <Icon name={c.icon} size={15} />
+      </div>
+
+      <div className="row-main">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div className="row-title" style={{ textDecoration: dim ? "line-through" : "none" }}>
+            {block.title}
+          </div>
+          {block.imp >= 3 && !dim && (
+            <span className="pill" style={{ background: "var(--chip)", color: "var(--red)" }}>
+              high
+            </span>
           )}
         </div>
-      </div>
-      <div style={{ flex: 1, padding: "14px 8px 14px 0" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
-          <div style={{ fontSize: 11, ...mono, color: "#8eaefb" }}>
-            {block.time}
-            {block.duration ? " \u00b7 " + block.duration : ""}
-            {moved && block.newTime ? " \u2192 " + block.newTime : ""}
+        {block.desc && <div className="row-desc">{block.desc}</div>}
+
+        <div className="row-meta">
+          <span>{block.time}</span>
+          {block.duration && <span>· {block.duration}</span>}
+          <span className="pill" style={{ background: shade(c.color, 12), color: c.color }}>
+            {c.label}
+          </span>
+        </div>
+
+        {badges.length > 0 && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+            {badges.map((b) => (
+              <span key={b.text} className="pill" style={{ background: "var(--chip)", color: b.color }}>
+                {b.text}
+              </span>
+            ))}
           </div>
-          <ImpDots imp={block.imp} />
-        </div>
-        <div
-          style={{
-            fontSize: 14,
-            fontWeight: 500,
-            color: block.done || skipped ? "#706d68" : "#f2efe9",
-            textDecoration: block.done || skipped ? "line-through" : "none",
-            marginBottom: 3,
-          }}
-        >
-          {block.title}
-        </div>
-        <div style={{ fontSize: 12.5, color: "#b0aca6", lineHeight: 1.6 }}>{block.desc}</div>
+        )}
 
         {showSkip && (
-          <div style={{ marginTop: 8, display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6, marginTop: 9 }}>
             <input
               value={skipInput}
               onChange={(e) => setSkipInput(e.target.value)}
               placeholder="What came up? (optional)"
-              style={{
-                flex: 1,
-                background: "#2a2a34",
-                border: "1px solid rgba(255,255,255,0.09)",
-                borderRadius: 6,
-                padding: "6px 10px",
-                fontSize: 16,
-                color: "#f2efe9",
-                outline: "none",
-              }}
+              style={{ flex: 1 }}
             />
             <button
+              className="btn"
               onClick={() => {
                 onSkip(block.id, skipInput.trim());
                 setShowSkip(false);
-              }}
-              style={{
-                background: "#32323e",
-                border: "none",
-                borderRadius: 6,
-                padding: "6px 12px",
-                fontSize: 11,
-                color: "#b0aca6",
-                cursor: "pointer",
               }}
             >
               Skip
             </button>
           </div>
         )}
-
-        <div style={{ display: "flex", gap: 5, marginTop: 6, flexWrap: "wrap" }}>
-          {block.done && (
-            <span
-              style={{
-                fontSize: 10,
-                ...mono,
-                color: "#81c995",
-                background: "rgba(129,201,149,0.12)",
-                padding: "2px 8px",
-                borderRadius: 99,
-              }}
-            >
-              completed
-            </span>
-          )}
-          {skipped && (
-            <span
-              style={{
-                fontSize: 10,
-                ...mono,
-                color: "#706d68",
-                background: "#32323e",
-                padding: "2px 8px",
-                borderRadius: 99,
-              }}
-            >
-              skipped{block.skipReason ? " - " + block.skipReason : ""}
-            </span>
-          )}
-          {moved && !block.done && (
-            <span
-              style={{
-                fontSize: 10,
-                ...mono,
-                color: "#f0c060",
-                background: "rgba(240,192,96,0.12)",
-                padding: "2px 8px",
-                borderRadius: 99,
-              }}
-            >
-              moved
-            </span>
-          )}
-          {skipCount >= 2 && !block.done && !skipped && (
-            <span
-              style={{
-                fontSize: 10,
-                ...mono,
-                color: "#f28b82",
-                background: "rgba(242,139,130,0.12)",
-                padding: "2px 8px",
-                borderRadius: 99,
-              }}
-            >
-              skipped {skipCount}x recently
-            </span>
-          )}
-        </div>
       </div>
 
-      {!block.done && !skipped && (
-        <div style={{ width: 34, flexShrink: 0, display: "flex", justifyContent: "center", paddingTop: 12, position: "relative" }}>
-          <button
-            onClick={() => setMenuOpen((o) => !o)}
-            style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 15, padding: 4 }}
+      <span className="pill row-cat" style={{ background: shade(c.color, 12), color: c.color }}>
+        {c.label}
+      </span>
+
+      <div className="row-dur">{block.duration}</div>
+
+      <div style={{ position: "relative", flexShrink: 0 }}>
+        <button
+          className="icon-btn"
+          style={{ width: 24, height: 24, fontSize: 14, opacity: dim ? 0 : 1, pointerEvents: dim ? "none" : "auto" }}
+          onClick={() => setMenuOpen((o) => !o)}
+        >
+          &hellip;
+        </button>
+        {menuOpen && (
+          <div
+            style={{
+              position: "absolute",
+              right: 0,
+              top: 28,
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+              boxShadow: "var(--shadow-md)",
+              zIndex: 50,
+              minWidth: 130,
+              overflow: "hidden",
+            }}
           >
-            &hellip;
-          </button>
-          {menuOpen && (
-            <div
-              style={{
-                position: "absolute",
-                right: 6,
-                top: 32,
-                background: "#2a2a34",
-                border: "1px solid rgba(255,255,255,0.16)",
-                borderRadius: 7,
-                zIndex: 50,
-                minWidth: 140,
-                overflow: "hidden",
-              }}
-            >
+            {[
+              ["Skip", () => setShowSkip(true)],
+              ["Move", () => onReschedule(block.id)],
+            ].map(([label, fn]) => (
               <button
+                key={label}
                 onClick={() => {
-                  setShowSkip(true);
+                  fn();
                   setMenuOpen(false);
                 }}
                 style={{
-                  padding: "9px 13px",
-                  fontSize: 12,
-                  cursor: "pointer",
-                  color: "#b0aca6",
-                  background: "none",
-                  border: "none",
+                  display: "block",
                   width: "100%",
                   textAlign: "left",
-                }}
-              >
-                Skip
-              </button>
-              <button
-                onClick={() => {
-                  onReschedule(block.id);
-                  setMenuOpen(false);
-                }}
-                style={{
                   padding: "9px 13px",
-                  fontSize: 12,
-                  cursor: "pointer",
-                  color: "#b0aca6",
+                  fontSize: 12.5,
+                  fontFamily: "inherit",
+                  color: "var(--text-2)",
                   background: "none",
                   border: "none",
-                  width: "100%",
-                  textAlign: "left",
+                  cursor: "pointer",
                 }}
               >
-                Move
+                {label}
               </button>
-            </div>
-          )}
-        </div>
-      )}
+            ))}
+          </div>
+        )}
+      </div>
+
+      <button
+        className={"check" + (block.done ? " on" : "")}
+        disabled={skipped}
+        onClick={() => {
+          if (skipped) return;
+          onStart(block.id);
+          onToggle(block.id);
+        }}
+      >
+        {block.done && <span className="tick" />}
+      </button>
     </div>
   );
 }
 
 function TaskCard({ task, onToggle, onEdit, onDelete }) {
-  const mono = { fontFamily: "monospace" };
   return (
     <div
+      className="card"
       onClick={() => onEdit(task)}
       style={{
-        background: "#22222a",
-        border: "1px solid rgba(255,255,255,0.09)",
-        borderRadius: 12,
         padding: "13px 15px",
         marginBottom: 8,
         display: "flex",
         alignItems: "flex-start",
-        gap: 11,
-        opacity: task.done ? 0.38 : 1,
+        gap: 12,
+        opacity: task.done ? 0.5 : 1,
         cursor: "pointer",
       }}
     >
-      <div
+      <button
+        className={"check" + (task.done ? " on" : "")}
+        style={{ marginTop: 1 }}
         onClick={(e) => {
           e.stopPropagation();
           onToggle(task.id);
         }}
-        style={{
-          width: 17,
-          height: 17,
-          border: `1.5px solid ${task.done ? "#8eaefb" : "rgba(255,255,255,0.22)"}`,
-          borderRadius: 5,
-          flexShrink: 0,
-          marginTop: 1,
-          cursor: "pointer",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: task.done ? "#8eaefb" : "none",
-        }}
       >
-        {task.done && (
-          <div
-            style={{
-              width: 8,
-              height: 5,
-              borderLeft: "2px solid #0e0f1a",
-              borderBottom: "2px solid #0e0f1a",
-              transform: "rotate(-45deg) translateY(-1px)",
-            }}
-          />
-        )}
-      </div>
-      <div style={{ flex: 1 }}>
-        <div style={{ fontSize: 13, textDecoration: task.done ? "line-through" : "none" }}>{task.name}</div>
+        {task.done && <span className="tick" />}
+      </button>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 550, textDecoration: task.done ? "line-through" : "none" }}>
+          {task.name}
+        </div>
         {(task.due || task.goal) && (
-          <div style={{ display: "flex", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
-            {task.due && <span style={{ fontSize: 11, ...mono, color: "#706d68" }}>Due: {task.due}</span>}
-            {task.goal && <span style={{ fontSize: 11, ...mono, color: "#706d68" }}>&rarr; {task.goal}</span>}
+          <div style={{ display: "flex", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
+            {task.due && (
+              <span className="pill" style={{ background: "var(--chip)", color: "var(--muted)" }}>
+                Due {task.due}
+              </span>
+            )}
+            {task.goal && (
+              <span className="pill" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
+                {task.goal}
+              </span>
+            )}
           </div>
         )}
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <ImpDots imp={task.imp || 1} />
         <button
+          className="icon-btn"
+          style={{ width: 24, height: 24, fontSize: 14 }}
           onClick={(e) => {
             e.stopPropagation();
             onDelete(task.id);
           }}
-          style={{ background: "none", border: "none", cursor: "pointer", color: "#706d68", fontSize: 12 }}
         >
           &times;
         </button>
@@ -2970,7 +3088,7 @@ function Modal({ children, onClose, title }) {
       style={{
         position: "fixed",
         inset: 0,
-        background: "rgba(0,0,0,0.55)",
+        background: "rgba(16,18,26,0.42)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -2980,19 +3098,20 @@ function Modal({ children, onClose, title }) {
       onClick={onClose}
     >
       <div
+        onClick={(e) => e.stopPropagation()}
         style={{
-          background: "#22222a",
-          border: "1px solid rgba(255,255,255,0.16)",
-          borderRadius: 12,
+          background: "var(--surface)",
+          border: "1px solid var(--border)",
+          borderRadius: 16,
+          boxShadow: "var(--shadow-md)",
           padding: 24,
           width: "100%",
-          maxWidth: 420,
+          maxWidth: 430,
           maxHeight: "85vh",
           overflowY: "auto",
         }}
-        onClick={(e) => e.stopPropagation()}
       >
-        <div style={{ fontFamily: "Georgia,serif", fontSize: 18, fontStyle: "italic", marginBottom: 18 }}>{title}</div>
+        <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.3px", marginBottom: 18 }}>{title}</div>
         {children}
       </div>
     </div>
@@ -3001,15 +3120,15 @@ function Modal({ children, onClose, title }) {
 
 function Field({ label, children }) {
   return (
-    <div style={{ marginBottom: 13 }}>
+    <div style={{ marginBottom: 14 }}>
       <div
         style={{
           fontSize: 10,
-          fontFamily: "monospace",
-          color: "#706d68",
-          marginBottom: 5,
+          fontWeight: 700,
+          color: "var(--muted)",
+          marginBottom: 6,
           textTransform: "uppercase",
-          letterSpacing: "0.08em",
+          letterSpacing: "0.1em",
         }}
       >
         {label}
@@ -3021,37 +3140,149 @@ function Field({ label, children }) {
 
 function ModalActions({ onCancel, onSave, saveLabel = "Save" }) {
   return (
-    <div style={{ display: "flex", gap: 8, marginTop: 20 }}>
-      <button
-        onClick={onCancel}
-        style={{
-          padding: "10px 16px",
-          fontSize: 13,
-          background: "none",
-          border: "1px solid rgba(255,255,255,0.09)",
-          borderRadius: 7,
-          color: "#b0aca6",
-          cursor: "pointer",
-        }}
-      >
+    <div style={{ display: "flex", gap: 8, marginTop: 22 }}>
+      <button className="btn" onClick={onCancel} style={{ padding: "10px 16px" }}>
         Cancel
       </button>
-      <button
-        onClick={onSave}
-        style={{
-          flex: 1,
-          padding: 10,
-          fontSize: 13,
-          fontWeight: 500,
-          background: "#8eaefb",
-          color: "#0e0f1a",
-          border: "none",
-          borderRadius: 7,
-          cursor: "pointer",
-        }}
-      >
+      <button className="btn btn-primary" onClick={onSave} style={{ flex: 1, justifyContent: "center", padding: "10px 16px" }}>
         {saveLabel}
       </button>
+    </div>
+  );
+}
+
+const ICONS = {
+  home: '<path d="M3 10.2 12 3l9 7.2V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+  calendar: '<rect x="3" y="4.5" width="18" height="16" rx="2.5"/><path d="M3 9.5h18M8 2.5v4M16 2.5v4"/>',
+  target: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1.2"/>',
+  bulb: '<path d="M9.5 18.5h5M10.5 21h3M12 3a6 6 0 0 0-3.4 10.9c.5.4.9 1.1.9 1.8v.3h5v-.3c0-.7.4-1.4.9-1.8A6 6 0 0 0 12 3z"/>',
+  compass: '<circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2.2 5.2-5.2 2.2 2.2-5.2z"/>',
+  check: '<rect x="3.5" y="3.5" width="17" height="17" rx="4.5"/><path d="m8 12.2 2.8 2.8L16.2 9"/>',
+  repeat: '<path d="M16.5 2.5 20 6l-3.5 3.5M20 6H7.5A3.5 3.5 0 0 0 4 9.5V11M7.5 21.5 4 18l3.5-3.5M4 18h12.5a3.5 3.5 0 0 0 3.5-3.5V13"/>',
+  chat: '<path d="M20.5 12a7.5 7.5 0 0 1-11 6.6L4 20.5l1.9-5.4A7.5 7.5 0 1 1 20.5 12z"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 6.8V12l3.4 2"/>',
+  gear: '<path d="M4 6h9M17.5 6h2.5M4 12h4.5M13 12h7M4 18h9M17.5 18h2.5"/><circle cx="15" cy="6" r="2.2"/><circle cx="10.5" cy="12" r="2.2"/><circle cx="15" cy="18" r="2.2"/>',
+  book: '<path d="M4.5 4.8A1.8 1.8 0 0 1 6.3 3H19v18H6.3a1.8 1.8 0 0 1-1.8-1.8z"/><path d="M4.5 16.8H19"/>',
+  briefcase: '<rect x="2.5" y="7" width="19" height="13" rx="2.5"/><path d="M8.5 7V5.2A2.2 2.2 0 0 1 10.7 3h2.6a2.2 2.2 0 0 1 2.2 2.2V7M2.5 12.5h19"/>',
+  dumbbell: '<path d="M6.8 6.5v11M3.5 9.2v5.6M17.2 6.5v11M20.5 9.2v5.6M6.8 12h10.4"/>',
+  rocket: '<path d="M12 2.6c3.4 2.5 5 6 5 9.4l-2.5 3.5h-5L7 12c0-3.4 1.6-6.9 5-9.4z"/><path d="M9.5 15.5 7.8 20l2.7-1.5M14.5 15.5 16.2 20l-2.7-1.5"/><circle cx="12" cy="9.8" r="1.7"/>',
+  cup: '<path d="M4 5.5h12V12a6 6 0 0 1-12 0z"/><path d="M16 7.5h2.2a2.5 2.5 0 0 1 0 5H16M3.5 20.5h13"/>',
+  folder: '<path d="M3 6.6A1.6 1.6 0 0 1 4.6 5h4L11 7.6h8.4A1.6 1.6 0 0 1 21 9.2v9.2a1.6 1.6 0 0 1-1.6 1.6H4.6A1.6 1.6 0 0 1 3 18.4z"/>',
+  star: '<path d="m12 3.2 2.6 5.5 6 .9-4.3 4.2 1 6-5.3-2.8-5.3 2.8 1-6L3.4 9.6l6-.9z"/>',
+  dot: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/>',
+  sparkle: '<path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>',
+  sun: '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2.1M12 19.5v2.1M4.6 4.6l1.5 1.5M17.9 17.9l1.5 1.5M2.4 12h2.1M19.5 12h2.1M4.6 19.4l1.5-1.5M17.9 6.1l1.5-1.5"/>',
+  moon: '<path d="M20.2 14.6A8.6 8.6 0 0 1 9.4 3.8a8.6 8.6 0 1 0 10.8 10.8z"/>',
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  refresh: '<path d="M20 11.4A8 8 0 1 0 19.2 16"/><path d="M20.4 5.2v6.2h-6.2"/>',
+};
+
+function Icon({ name, size = 18, style }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flexShrink: 0, display: "block", ...style }}
+      dangerouslySetInnerHTML={{ __html: ICONS[name] || ICONS.dot }}
+    />
+  );
+}
+
+function SignIn({ theme }) {
+  const [mode, setMode] = useState("in");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const creds = { email: email.trim(), password };
+    const { data, error: err } =
+      mode === "in"
+        ? await supabase.auth.signInWithPassword(creds)
+        : await supabase.auth.signUp(creds);
+    setBusy(false);
+    if (err) {
+      setError(err.message);
+      return;
+    }
+    // Sign-up with email confirmation on returns a user but no session.
+    if (mode === "up" && !data.session) {
+      setNotice("Check your email to confirm the account, then sign in.");
+      setMode("in");
+    }
+  };
+
+  return (
+    <div
+      className={"app" + (theme === "dark" ? " dark" : "")}
+      style={{ alignItems: "center", justifyContent: "center", padding: 20 }}
+    >
+      <form onSubmit={submit} className="card" style={{ width: "100%", maxWidth: 360, padding: 26 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 11, marginBottom: 6 }}>
+          <div style={{ width: 22, height: 22, borderRadius: "50%", border: "3.5px solid var(--text)" }} />
+          <div style={{ fontSize: 15, fontWeight: 750, letterSpacing: "0.16em" }}>LOCUS</div>
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 20, lineHeight: 1.6 }}>
+          {mode === "in" ? "Sign in and your plan follows you between devices." : "Create the account your data lives under."}
+        </div>
+
+        <Field label="Email">
+          <input
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            autoComplete="email"
+            required
+          />
+        </Field>
+        <Field label="Password">
+          <input
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete={mode === "in" ? "current-password" : "new-password"}
+            minLength={6}
+            required
+          />
+        </Field>
+
+        {error && <div style={{ fontSize: 12, color: "var(--red)", marginBottom: 10, lineHeight: 1.5 }}>{error}</div>}
+        {notice && <div style={{ fontSize: 12, color: "var(--accent)", marginBottom: 10, lineHeight: 1.5 }}>{notice}</div>}
+
+        <button
+          type="submit"
+          className="btn btn-primary"
+          disabled={busy}
+          style={{ width: "100%", justifyContent: "center", padding: "11px 16px", marginTop: 4 }}
+        >
+          {busy ? "..." : mode === "in" ? "Sign in" : "Create account"}
+        </button>
+
+        <button
+          type="button"
+          className="link-btn"
+          style={{ marginTop: 16, width: "100%", textAlign: "center" }}
+          onClick={() => {
+            setMode((m) => (m === "in" ? "up" : "in"));
+            setError("");
+          }}
+        >
+          {mode === "in" ? "Need an account? Create one" : "Already have an account? Sign in"}
+        </button>
+      </form>
     </div>
   );
 }
