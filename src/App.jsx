@@ -1570,6 +1570,24 @@ Rough one. Dropped the deep work block and moved the call to tonight.
       </aside>
 
       <div className="main">
+        {IS_DEMO && (
+          <div className="demo-bar">
+            <span>
+              Most planners hold your day. <span className="demo-bar-strong">Locus holds your life.</span>
+            </span>
+            <span className="demo-bar-sub">
+              Goals, habits, tasks and parked ideas &mdash; the day is built out of all of it.
+            </span>
+            <span className="demo-bar-right">
+              <span className="pill" style={{ background: "var(--surface)", color: "var(--accent)" }}>
+                DEMO &middot; nothing saved
+              </span>
+              <a href="/" className="link-btn" style={{ textDecoration: "none" }}>
+                Sign in
+              </a>
+            </span>
+          </div>
+        )}
         <header className="topbar">
           <button className="icon-btn mobile-only" onClick={() => setSidebarOpen(true)}>
             <Icon name="menu" />
@@ -1577,19 +1595,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
           <div className="topbar-title">
             {tab === "today" ? (
               <>
-                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                  <div className="greet">{greeting}</div>
-                  {IS_DEMO && (
-                    <>
-                      <span className="pill" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
-                        DEMO &middot; sample data
-                      </span>
-                      <a href="/" className="link-btn" style={{ textDecoration: "none" }}>
-                        Sign in
-                      </a>
-                    </>
-                  )}
-                </div>
+                <div className="greet">{greeting}</div>
                 <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 5 }}>
                   {now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
                 </div>
