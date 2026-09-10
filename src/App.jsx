@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase, pullAll, pushItems, pushPlanDay, pushDoc, isEmptyState } from "./db";
+import { IS_DEMO, DEMO_STATE } from "./demo";
 import "./App.css";
 
 const KEYS = {
@@ -19,6 +20,7 @@ const KEYS = {
 };
 
 function load(key, fallback) {
+  if (IS_DEMO) return DEMO_STATE[key] ?? fallback;
   try {
     const v = localStorage.getItem(key);
     return v ? JSON.parse(v) : fallback;
@@ -28,6 +30,7 @@ function load(key, fallback) {
 }
 
 function save(key, val) {
+  if (IS_DEMO) return;
   try {
     localStorage.setItem(key, JSON.stringify(val));
   } catch {}
@@ -452,6 +455,7 @@ export default function App() {
   // in-app chat uses, then clears the queue server-side. If the backend isn't
   // deployed yet, or you're offline, this just silently no-ops.
   useEffect(() => {
+    if (IS_DEMO) return;
     if (inboxDrainedRef.current) return;
     inboxDrainedRef.current = true;
 
@@ -495,7 +499,7 @@ export default function App() {
     // the pointless request.
     const empty =
       !goals.length && !tasks.length && !habits.length && !ideas.length && !todayPlan.length && !tomorrowPlan.length;
-    if (empty) return;
+    if (IS_DEMO || empty) return;
 
     if (mirrorTimerRef.current) clearTimeout(mirrorTimerRef.current);
     mirrorTimerRef.current = setTimeout(() => {
@@ -1214,7 +1218,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
 
 
   const [theme, setTheme] = useState(() => localStorage.getItem("locus_theme") || "light");
-  const [userName, setUserName] = useState(() => localStorage.getItem("locus_name") || "");
+  const [userName, setUserName] = useState(() => localStorage.getItem("locus_name") || (IS_DEMO ? "Atri" : ""));
   const [cmdInput, setCmdInput] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const cmdRef = useRef(null);
@@ -1316,14 +1320,16 @@ Rough one. Dropped the deep work block and moved the call to tonight.
     rest: { label: "Break", icon: "cup", color: "var(--green)" },
     admin: { label: "Admin", icon: "folder", color: "var(--muted)" },
     routine: { label: "Routine", icon: "star", color: "var(--accent)" },
+    build: { label: "Build", icon: "rocket", color: "var(--accent)" },
     focus: { label: "Focus", icon: "dot", color: "var(--accent)" },
   };
   const CAT_WORDS = [
-    ["school", /\b(class|lecture|study|homework|exam|problem set|reading|course|cs |acc |quiz|assignment|revision)\b/],
+    ["school", /\b(class|lecture|study|homework|exam|problem set|reading|course|cs |acc |fin |quiz|assignment|revision|lab|tutor|tutoring|writeup|office hours)\b/],
     ["rest", /\b(break|lunch|dinner|breakfast|rest|nap|unwind|relax|recharge|meal|coffee)\b/],
     ["health", /\b(workout|gym|run|lift|walk|yoga|stretch|sleep|health|training|cardio)\b/],
-    ["career", /\b(intern|job|apply|application|recruit|resume|interview|career|linkedin|networking)\b/],
+    ["career", /\b(intern|job|apply|application|recruit|resume|interview|career|linkedin|networking|trailhead|cert|certification|salesforce|mock demo)\b/],
     ["startup", /\b(startup|launch|customer|build|ship|product|research|pitch|founder|market)\b/],
+    ["build", /\b(merge|refactor|schema|migration|deploy|debug|backend|frontend|api|bug|feature|locus|ship it|rebuild)\b/],
     ["admin", /\b(email|inbox|admin|errand|chore|clean|bills|calendar|buffer|misc)\b/],
     ["routine", /\b(review|plan|reflect|journal|meditat|routine|wind down|morning|evening)\b/],
   ];
@@ -1342,10 +1348,10 @@ Rough one. Dropped the deep work block and moved the call to tonight.
     sendChat(v);
   };
 
-  if (!authReady) {
+  if (!authReady && !IS_DEMO) {
     return <div className={"app" + (theme === "dark" ? " dark" : "")} />;
   }
-  if (!session) {
+  if (!session && !IS_DEMO) {
     return <SignIn theme={theme} />;
   }
 
@@ -1463,6 +1469,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 <button
                   style={{ ...ghostBtn, flex: 1, fontSize: 10.5, color: "var(--red)", borderColor: "var(--red)" }}
                   onClick={() => {
+                    if (IS_DEMO) return;
                     if (window.confirm("Erase ALL data and start completely fresh? This cannot be undone.")) {
                       Object.values(KEYS).forEach((k) => localStorage.removeItem(k));
                       window.location.reload();
@@ -1570,7 +1577,19 @@ Rough one. Dropped the deep work block and moved the call to tonight.
           <div className="topbar-title">
             {tab === "today" ? (
               <>
-                <div className="greet">{greeting}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div className="greet">{greeting}</div>
+                  {IS_DEMO && (
+                    <>
+                      <span className="pill" style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
+                        DEMO &middot; sample data
+                      </span>
+                      <a href="/" className="link-btn" style={{ textDecoration: "none" }}>
+                        Sign in
+                      </a>
+                    </>
+                  )}
+                </div>
                 <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 5 }}>
                   {now.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
                 </div>
@@ -3282,6 +3301,21 @@ function SignIn({ theme }) {
         >
           {mode === "in" ? "Need an account? Create one" : "Already have an account? Sign in"}
         </button>
+
+        {/* Demo mode is decided from the URL at load, so this has to be a real
+            navigation rather than a state change. */}
+        <div style={{ borderTop: "1px solid var(--border)", marginTop: 18, paddingTop: 16 }}>
+          <a
+            href="/?demo"
+            className="btn"
+            style={{ width: "100%", justifyContent: "center", padding: "10px 16px", textDecoration: "none" }}
+          >
+            Explore the demo
+          </a>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 9, textAlign: "center", lineHeight: 1.55 }}>
+            No account needed &mdash; a sample week of real planning, nothing saved
+          </div>
+        </div>
       </form>
     </div>
   );
