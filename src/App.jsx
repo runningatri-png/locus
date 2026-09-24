@@ -77,6 +77,65 @@ async function callClaude(system, messages, useWebSearch = false) {
   return data.content?.[0]?.text || "";
 }
 
+/**
+ * Pulls the action array out of a chat reply.
+ *
+ * The model is told to put it raw on the final line, but it sometimes wraps it
+ * in a ```json fence or pretty-prints it across several lines. The old code
+ * only accepted the final-line case, so anything else showed the user raw JSON
+ * AND silently applied nothing - the worst pair of outcomes. Try each shape,
+ * and if none parse, at least keep the payload out of the chat bubble and admit
+ * the change didn't land.
+ */
+function splitReply(raw) {
+  let message = (raw || "").trim();
+
+  const looksLikeActions = (v) =>
+    Array.isArray(v) && v.length > 0 && v.every((x) => x && typeof x === "object" && typeof x.type === "string");
+
+  const candidates = [];
+  const fence = message.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence) candidates.push({ json: fence[1], cut: fence[0] });
+
+  const lines = message.split("\n");
+  const last = lines[lines.length - 1].trim();
+  if (last.startsWith("[")) candidates.push({ json: last, cut: last });
+
+  const open = message.lastIndexOf("[");
+  const close = message.lastIndexOf("]");
+  if (open !== -1 && close > open) {
+    const slice = message.slice(open, close + 1);
+    candidates.push({ json: slice, cut: slice });
+  }
+
+  for (const c of candidates) {
+    try {
+      const parsed = JSON.parse(c.json.trim());
+      if (looksLikeActions(parsed)) {
+        return {
+          message: message.replace(c.cut, "").replace(/```(?:json)?/gi, "").trim(),
+          actions: parsed,
+        };
+      }
+    } catch {
+      // try the next shape
+    }
+  }
+
+  if (/\{\s*"type"\s*:/.test(message)) {
+    return {
+      message: message
+        .replace(/```(?:json)?[\s\S]*?```/gi, "")
+        .replace(/\[\s*\{[\s\S]*\}\s*\]/g, "")
+        .trim(),
+      actions: [],
+      unparsed: true,
+    };
+  }
+
+  return { message, actions: [] };
+}
+
 function buildContext({ goals, tasks, habits, ideas, skipPatterns, timestamps, context }) {
   const ord = ["front", "maint", "back"];
   const sorted = [...goals].sort((a, b) => ord.indexOf(a.p) - ord.indexOf(b.p));
@@ -131,7 +190,15 @@ function buildContext({ goals, tasks, habits, ideas, skipPatterns, timestamps, c
 
   const ctxNotes = context.slice(0, 5).map((c) => `- ${c.date}: ${c.text}`).join("\n") || "None";
 
-  return `USER CONTEXT
+  const today = new Date();
+  const tmr = new Date(today.getTime() + 86400000);
+  const longDate = (d) => d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+
+  return `TODAY IS ${longDate(today)} (${isoKey(today)}). Tomorrow is ${longDate(tmr)} (${isoKey(tmr)}).
+Never guess or assume the date - it is stated above. Any deadline you set must fall on or after today.
+Write exact days as YYYY-MM-DD and keep vague ones vague ("Friday", "next week") rather than inventing a precise date.
+
+USER CONTEXT
 
 GOALS - front burner:
 ${group("front")}
@@ -1055,7 +1122,7 @@ ${ctx}
 
 TODAY'S PLAN RIGHT NOW: ${planState}
 
-Reply in plain conversational text. If you need to change data, put a JSON array of actions on the FINAL line by itself with nothing after it.
+Reply in plain conversational text. If you need to change data, put a JSON array of actions on the FINAL line by itself with nothing after it. Emit it as raw JSON - never wrap it in a code fence or label it.
 
 ACTIONS:
 {"type":"add_goal","name","area","desc","deadline","priority":"front|maint|back"}
@@ -1105,21 +1172,17 @@ Rough one. Dropped the deep work block and moved the call to tonight.
 
     try {
       const reply = await callClaude(system, nextHistory, wantsSearch);
-      let message = reply.trim();
-      let actions = [];
-      const lines = message.split("\n");
-      const last = lines[lines.length - 1].trim();
-      if (last.startsWith("[")) {
-        try {
-          const parsed = JSON.parse(last);
-          if (Array.isArray(parsed)) {
-            actions = parsed;
-            message = lines.slice(0, -1).join("\n").trim();
-          }
-        } catch {}
-      }
+      const { message, actions, unparsed } = splitReply(reply);
 
-      setChatHistory((prev) => [...prev, { role: "assistant", content: message || "Done." }]);
+      setChatHistory((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content:
+            (message || "Done.") +
+            (unparsed ? "\n\nI couldn't apply that change - say it again and I'll retry." : ""),
+        },
+      ]);
 
       if (actions.length) {
         const res = applyActions(actions, { gs: goals, ts: tasks, hs: habits, is: ideas });
