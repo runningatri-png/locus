@@ -728,8 +728,13 @@ export default function App() {
         }
         case "delete_goal": {
           const before = gs.length;
+          const removed = gs.filter((g) => matches(g, a, "name")).map((g) => norm(g.name));
           gs = gs.filter((g) => !matches(g, a, "name"));
-          if (gs.length < before) toast("Deleted goal");
+          if (gs.length < before) {
+            // Unlink the tasks too, or the dead name keeps reaching the model.
+            ts = ts.map((t) => (t.goal && removed.includes(norm(t.goal)) ? { ...t, goal: "" } : t));
+            toast("Deleted goal");
+          }
           break;
         }
         case "set_goal_priority": {
@@ -2446,8 +2451,28 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
+                          // A deleted goal's name lives on in task.goal, and buildContext keeps
+                          // feeding it to the model as [goal: ...] - ghost data by another route.
+                          const linked = tasks.filter((t) => t.goal && norm(t.goal) === norm(g.name));
+                          if (
+                            linked.length &&
+                            !window.confirm(
+                              `${linked.length} task${linked.length === 1 ? " is" : "s are"} linked to "${g.name}". Delete the goal and unlink ${
+                                linked.length === 1 ? "it" : "them"
+                              }?`
+                            )
+                          )
+                            return;
                           setGoals((prev) => prev.filter((x) => x.id !== g.id));
-                          toast("Deleted goal");
+                          if (linked.length)
+                            setTasks((prev) =>
+                              prev.map((t) => (t.goal && norm(t.goal) === norm(g.name) ? { ...t, goal: "" } : t))
+                            );
+                          toast(
+                            linked.length
+                              ? `Deleted goal, unlinked ${linked.length} task${linked.length === 1 ? "" : "s"}`
+                              : "Deleted goal"
+                          );
                         }}
                         style={{
                           background: "none",
@@ -2962,6 +2987,19 @@ Rough one. Dropped the deep work block and moved the call to tonight.
 
 function PlanBlock({ block, cat, tint, onToggle, onSkip, onReschedule, onStart, skipCount }) {
   const [menuOpen, setMenuOpen] = useState(false);
+
+  // Close on any click elsewhere. Registered a tick late so the click that
+  // opened the menu doesn't immediately close it again; opening a second row's
+  // menu now also closes the first, since that click reaches the document too.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = () => setMenuOpen(false);
+    const id = setTimeout(() => document.addEventListener("click", close), 0);
+    return () => {
+      clearTimeout(id);
+      document.removeEventListener("click", close);
+    };
+  }, [menuOpen]);
   const [skipInput, setSkipInput] = useState("");
   const [showSkip, setShowSkip] = useState(false);
   const skipped = block.status === "skipped";
@@ -3171,6 +3209,14 @@ function TaskCard({ task, onToggle, onEdit, onDelete }) {
 }
 
 function Modal({ children, onClose, title }) {
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
     <div
       style={{
