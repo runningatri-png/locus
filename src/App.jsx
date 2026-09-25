@@ -2444,15 +2444,14 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 </div>
               )}
 
-              <div style={{ display: "flex", gap: 7 }}>
-                <input
+              <div style={{ display: "flex", gap: 7, alignItems: "flex-end" }}>
+                <AutoGrow
                   value={tmrInput}
-                  onChange={(e) => setTmrInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && sendTomorrowChat()}
+                  onChange={setTmrInput}
+                  onSend={sendTomorrowChat}
                   placeholder={
                     selectedSuggestions.length ? "Anything else tomorrow needs..." : "Tell me what tomorrow needs..."
                   }
-                  style={inputStyle}
                 />
                 <button
                   onClick={sendTomorrowChat}
@@ -2730,14 +2729,19 @@ Rough one. Dropped the deep work block and moved the call to tonight.
               <div ref={chatEndRef} />
             </div>
             <div
-              style={{ display: "flex", gap: 8, padding: "12px 20px 20px", borderTop: "1px solid var(--border)" }}
+              style={{
+                display: "flex",
+                gap: 8,
+                alignItems: "flex-end",
+                padding: "12px 20px 20px",
+                borderTop: "1px solid var(--border)",
+              }}
             >
-              <input
+              <AutoGrow
                 value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && sendChat()}
+                onChange={setChatInput}
+                onSend={sendChat}
                 placeholder="What's going on..."
-                style={inputStyle}
               />
               <button
                 onClick={sendChat}
@@ -3793,6 +3797,43 @@ function Icon({ name, size = 18, style }) {
       strokeLinejoin="round"
       style={{ flexShrink: 0, display: "block", ...style }}
       dangerouslySetInnerHTML={{ __html: ICONS[name] || ICONS.dot }}
+    />
+  );
+}
+
+/**
+ * A chat composer that grows with what you type. An <input> can only ever show
+ * one line, so anything past the right edge scrolls out of sight while you're
+ * still writing it. Enter sends; Shift+Enter starts a new line.
+ */
+function AutoGrow({ value, onChange, onSend, placeholder, disabled }) {
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto"; // measure from scratch so deleting shrinks it too
+    // scrollHeight covers content + padding but not borders, and box-sizing is
+    // border-box here - without adding them back the last line gets clipped.
+    const borders = el.offsetHeight - el.clientHeight;
+    el.style.height = Math.min(el.scrollHeight + borders, 168) + "px";
+  }, [value]);
+
+  return (
+    <textarea
+      ref={ref}
+      className="composer"
+      rows={1}
+      value={value}
+      disabled={disabled}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          onSend();
+        }
+      }}
+      placeholder={placeholder}
     />
   );
 }

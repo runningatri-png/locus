@@ -354,6 +354,19 @@ input, textarea, select {
 .app input:not(.bare):focus, .app textarea:focus, .app select:focus { border-color: var(--accent-line); }
 .app textarea { min-height: 76px; resize: vertical; line-height: 1.55; }
 
+/* The chat composer sizes itself to its content, so the shared textarea
+   min-height would fight it. */
+.app textarea.composer {
+  flex: 1;
+  min-height: 0;
+  max-height: 168px;
+  resize: none;
+  overflow-y: auto;
+  line-height: 1.5;
+  padding: 10px 14px;
+  border-radius: 10px;
+}
+
 /* ---------- demo banner ---------- */
 .demo-bar {
   flex-shrink: 0;
