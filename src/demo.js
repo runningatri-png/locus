@@ -78,10 +78,10 @@ const tasks = [
 ];
 
 const habits = [
-  { id: "d-h1", name: "Lift", freq: "5x a week", note: "upper/lower split", streak: 11, tickedToday: false, lastTicked: iso(-1), week: [1, 1, 0, 1, 1, 1, 0] },
-  { id: "d-h2", name: "Read 20 pages", freq: "daily", note: "", streak: 24, tickedToday: true, lastTicked: iso(0), week: [1, 1, 1, 1, 1, 1, 1] },
-  { id: "d-h3", name: "Mental math drills", freq: "daily", note: "10 min soroban", streak: 6, tickedToday: false, lastTicked: iso(-1), week: [1, 1, 1, 0, 1, 1, 0] },
-  { id: "d-h4", name: "Anki review", freq: "weekdays", note: "accounting deck", streak: 3, tickedToday: false, lastTicked: iso(-1), week: [0, 1, 1, 1, 0, 0, 1] },
+  { id: "d-h1", name: "Lift", freq: "5x a week", note: "upper/lower split", days: [1, 3, 5, 6, 0], start: "10:15", end: "12:00", streak: 11, tickedToday: false, lastTicked: iso(-1), week: [1, 1, 0, 1, 1, 1, 0] },
+  { id: "d-h2", name: "Read 20 pages", freq: "daily", note: "", days: [], start: "", end: "", streak: 24, tickedToday: true, lastTicked: iso(0), week: [1, 1, 1, 1, 1, 1, 1] },
+  { id: "d-h3", name: "Mental math drills", freq: "daily", note: "10 min soroban", days: [], start: "", end: "", streak: 6, tickedToday: false, lastTicked: iso(-1), week: [1, 1, 1, 0, 1, 1, 0] },
+  { id: "d-h4", name: "Anki review", freq: "weekdays", note: "accounting deck", days: [1, 2, 3, 4, 5], start: "", end: "", streak: 3, tickedToday: false, lastTicked: iso(-1), week: [0, 1, 1, 1, 0, 0, 1] },
 ];
 
 const ideas = [
@@ -97,12 +97,10 @@ const ideas = [
 const commitments = [
   { id: "d-c-fin", label: "FIN 445 lecture", kind: "class", days: [1, 3, 5], start: "13:00", end: "13:50", note: "Gatton 191" },
   { id: "d-c-tut", label: "Tutoring shift", kind: "work", days: [2, 4], start: "14:00", end: "18:00", note: "" },
-  { id: "d-c-gym", label: "Lift", kind: "gym", days: [1, 3, 5, 6, 0], start: "10:15", end: "12:00", note: "" },
   { id: "d-c-chap", label: "Chapter meeting", kind: "other", days: [2], start: "19:00", end: "20:00", note: "every other week" },
 ];
 
 const todayPlan = [
-  { id: "d-b1", time: "7:30 AM", duration: "60 min", title: "Lift - upper body", desc: "Push day, then protein shake", imp: 2, done: true },
   { id: "d-b2", time: "9:00 AM", duration: "75 min", title: "CS 218 lecture", desc: "Process scheduling and signals", imp: 2, done: true },
   { id: "d-b3", time: "10:30 AM", duration: "20 min", title: "Break", desc: "Walk, no phone", imp: 1, done: true },
   { id: "d-b4", time: "11:00 AM", duration: "90 min", title: "CS 218 lab 4 writeup", desc: "Due tomorrow - finish the fork/exec section", imp: 3, done: false },

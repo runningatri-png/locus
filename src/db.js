@@ -47,6 +47,9 @@ const MAPPERS = {
       ticked_today: !!h.tickedToday,
       last_ticked: h.lastTicked || null,
       week: Array.isArray(h.week) ? h.week : [0, 0, 0, 0, 0, 0, 0],
+      days: Array.isArray(h.days) ? h.days : [],
+      start_time: h.start || "",
+      end_time: h.end || "",
     }),
     toApp: (r) => ({
       id: r.id,
@@ -57,6 +60,9 @@ const MAPPERS = {
       tickedToday: r.ticked_today,
       lastTicked: r.last_ticked || "",
       week: r.week,
+      days: r.days || [],
+      start: r.start_time || "",
+      end: r.end_time || "",
     }),
   },
   ideas: {

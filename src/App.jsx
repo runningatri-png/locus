@@ -246,12 +246,14 @@ function buildContext({ goals, tasks, habits, ideas, commitments, skipPatterns, 
     ? habits
         .map(
           (h) =>
-            `- [id:${h.id}] ${h.name} (${h.freq || "no set frequency"})${
-              h.note ? " - " + h.note : ""
-            }, streak: ${h.streak || 0}`
+            `- [id:${h.id}] ${h.name} - ${
+              (h.days || []).length ? h.days.map((d) => DAY_SHORT[d]).join("/") : "every day"
+            }${h.start ? " at " + fmt12(h.start) : " (no set time)"}${h.note ? " - " + h.note : ""}, streak: ${
+              h.streak || 0
+            }`
         )
         .join("\n")
-    : "NONE. The user has zero habits right now.";
+    : "NONE. The user has zero routines right now.";
 
   const patterns =
     Object.entries(skipPatterns)
@@ -306,7 +308,7 @@ These are placed on the day automatically. Never add_block for them, and never s
 PENDING TASKS:
 ${taskCtx}
 
-HABITS (complete and only list):
+TRACKED ROUTINES (complete and only list - these place themselves on matching days, never add_block for them):
 ${habitCtx}
 
 SKIP PATTERNS (historical stats only - never schedule something because it appears here):
@@ -937,13 +939,16 @@ export default function App() {
               name: a.name,
               freq: a.freq || "daily",
               note: a.note || "",
+              days: parseDays(a.days),
+              start: a.start || "",
+              end: a.end || "",
               streak: 0,
               week: [0, 0, 0, 0, 0, 0, 0],
               tickedToday: false,
               lastTicked: null,
             },
           ];
-          toast("Added habit: " + a.name);
+          toast("Added routine: " + a.name);
           break;
         }
         case "edit_habit": {
@@ -1090,7 +1095,7 @@ export default function App() {
     const allHabits = src.hs || [];
 
     if (!allHabits.length) {
-      toast("No habits yet - add some in Habits");
+      toast("No routines yet - add some under Schedule");
       return;
     }
 
@@ -1232,6 +1237,14 @@ imp is 1, 2, or 3.`;
       if (navigator.vibrate) navigator.vibrate([12, 8, 20]);
     }
     setTodayPlan((prev) => prev.map((x) => (x.id === id ? { ...x, done: !x.done } : x)));
+
+    // Checking a routine off on Today is the same act as ticking the habit -
+    // it used to move the block and leave the streak untouched. tickHabit stays
+    // the single mutator, so this can't double-count.
+    if (b.habitId) {
+      const h = habits.find((x) => x.id === b.habitId);
+      if (h && !!h.tickedToday === !!b.done) tickHabit(b.habitId);
+    }
   }
 
   function startBlock(id) {
@@ -1306,7 +1319,7 @@ ACTIONS:
 {"type":"complete_task","name"}
 {"type":"uncomplete_task","name"}
 {"type":"delete_task","name"}
-{"type":"add_habit","name","freq","note"}
+{"type":"add_habit","name","days":["Mon","Wed"],"start":"10:15","note"}  <- a tracked routine; omit days for every day, omit start if it has no set time
 {"type":"edit_habit","name","updates":{}}
 {"type":"tick_habit","name","value":true|false}
 {"type":"delete_habit","name"}
@@ -1337,9 +1350,10 @@ HARD RULES:
 4. Never emit an action with an empty name or text field.
 5. When the user shares stress, mood, or life circumstances, capture it with add_context so future plans account for it.
 6. Be direct and specific. Reference their real goals by name. Confirm exactly what you changed.
-7. A recurring class, shift or standing obligation is a COMMITMENT - not a context note and not a habit. Use add_commitment; it places itself on every matching day automatically. Times in 24h ("13:00"). Never restate a weekly schedule as prose in add_context.
-8. When a context note is now wrong, correct it with edit_context or remove it with delete_context. NEVER add a second note that contradicts one already in LIFE CONTEXT NOTES - the old one does not disappear, and you will then be reading both.
-9. Saying you saved, updated or fixed something without emitting the matching action is a lie to the user. Emit the action.
+7. Recurring things split two ways: a class, shift or standing obligation is a COMMITMENT (add_commitment); something the user is trying to do consistently and wants a streak for is a ROUTINE (add_habit). Both place themselves on matching days - never add_block for either.
+8. A recurring class, shift or standing obligation is a COMMITMENT - not a context note and not a habit. Use add_commitment; it places itself on every matching day automatically. Times in 24h ("13:00"). Never restate a weekly schedule as prose in add_context.
+9. When a context note is now wrong, correct it with edit_context or remove it with delete_context. NEVER add a second note that contradicts one already in LIFE CONTEXT NOTES - the old one does not disappear, and you will then be reading both.
+10. Saying you saved, updated or fixed something without emitting the matching action is a lie to the user. Emit the action.
 
 Example (small addition - no regenerate):
 Added a call with Alex to this evening.
@@ -1469,23 +1483,52 @@ Rough one. Dropped the deep work block and moved the call to tonight.
     startTime: null,
   });
 
+  // A tracked routine is the same shape with a streak attached. No days set
+  // means every day - a 5x-a-week habit should still appear daily to tick.
+  const habitBlockFor = (h) => ({
+    id: uid(),
+    src: h.id,
+    habitId: h.id,
+    tracked: true,
+    time: h.start ? fmt12(h.start) : "Anytime",
+    duration: durationLabel(h.start, h.end),
+    title: h.name,
+    desc: h.note || "",
+    imp: 2,
+    done: false,
+    status: "pending",
+    startTime: null,
+  });
+
   const placeFixed = (dayKey, setPlan) => {
     const dow = new Date(dayKey + "T12:00:00").getDay();
     const skip = fixedDismissed[dayKey] || [];
     setPlan((prev) => {
       const present = new Set(prev.filter((b) => b.src).map((b) => b.src));
-      const add = commitments
-        .filter((c) => (c.days || []).includes(dow) && !present.has(c.id) && !skip.includes(c.id))
-        .map(blockFor);
+      const titled = new Set(prev.map((b) => norm(b.title)));
+      const add = [
+        ...commitments
+          .filter((c) => (c.days || []).includes(dow) && !present.has(c.id) && !skip.includes(c.id))
+          .map(blockFor),
+        ...habits
+          .filter(
+            (h) =>
+              (!(h.days || []).length || h.days.includes(dow)) &&
+              !present.has(h.id) &&
+              !skip.includes(h.id) &&
+              !titled.has(norm(h.name)) // don't duplicate one the planner already laid out
+          )
+          .map(habitBlockFor),
+      ];
       return add.length ? sortPlan([...prev, ...add]) : prev;
     });
   };
 
   useEffect(() => {
-    if (!commitments.length) return;
+    if (!commitments.length && !habits.length) return;
     placeFixed(todayK, setTodayPlan);
     placeFixed(tomorrowK, setTomorrowPlan);
-  }, [commitments, fixedDismissed, todayK, tomorrowK]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [commitments, habits, fixedDismissed, todayK, tomorrowK]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const dropFixedForDay = (block, dayKey) => {
     setTodayPlan((prev) => prev.filter((b) => b.id !== block.id));
@@ -1585,7 +1628,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
       items: [
         { id: "today", label: "Today", icon: "home" },
         { id: "calendar", label: "Calendar", icon: "calendar" },
-        { id: "schedule", label: "Schedule", icon: "grid", badge: commitments.length },
+        { id: "schedule", label: "Schedule", icon: "grid", badge: commitments.length + habits.length },
         { id: "tomorrow", label: "Plan", icon: "target" },
         { id: "ideas", label: "Ideas", icon: "bulb", badge: ideas.length },
       ],
@@ -1595,7 +1638,6 @@ Rough one. Dropped the deep work block and moved the call to tonight.
       items: [
         { id: "goals", label: "Goals", icon: "compass", badge: goals.length },
         { id: "tasks", label: "Tasks", icon: "check", badge: tasks.filter((t) => !t.done).length },
-        { id: "habits", label: "Habits", icon: "repeat", badge: habits.length },
         { id: "chat", label: "Chat", icon: "chat" },
         { id: "history", label: "History", icon: "clock" },
       ],
@@ -1961,9 +2003,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       <div style={{ fontSize: 11.5, color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
                         {completedCount}/{todayPlan.length}
                       </div>
-                      <button className="btn" onClick={() => generateToday(null)} disabled={planLoading}>
-                        {planLoading ? "…" : "Add habits"}
-                      </button>
+
                     </div>
                   </div>
 
@@ -1979,7 +2019,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       }}
                     >
                       {habits.length
-                        ? "Nothing on today yet. Add habits lays out your habits — everything else comes from Plan or Chat."
+                        ? "Nothing on today yet. Your routines and commitments place themselves — everything else comes from Plan or Chat."
                         : "Nothing on today yet. You have no habits, so there's nothing to lay out — plan the day under Plan, or add blocks through Chat."}
                     </div>
                   )}
@@ -2127,6 +2167,81 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     </div>
                   );
                 })}
+              </div>
+
+              <div className="card" style={{ marginBottom: 18 }}>
+                <div className="card-head">
+                  <div className="card-title">Routines</div>
+                  <button
+                    className="btn btn-primary"
+                    style={{ marginLeft: "auto" }}
+                    onClick={() => setHabitModal({ name: "", freq: "", note: "", days: [], start: "", end: "" })}
+                  >
+                    + Add
+                  </button>
+                </div>
+                <div style={{ padding: "0 18px 10px", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
+                  Things you're trying to do consistently. These place themselves too, and ticking one off on Today is
+                  what moves the streak. No days picked means it shows up every day.
+                </div>
+                {!habits.length && (
+                  <div style={{ padding: "8px 18px 20px", fontSize: 13, color: "var(--muted)" }}>
+                    No routines yet.
+                  </div>
+                )}
+                {habits.map((h) => (
+                  <div
+                    key={h.id}
+                    style={{ borderTop: "1px solid var(--border)", padding: "12px 18px", display: "flex", gap: 12, alignItems: "center" }}
+                  >
+                    <div
+                      onClick={() => setHabitModal({ days: [], start: "", end: "", ...h })}
+                      style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+                    >
+                      <div style={{ fontSize: 13.5, fontWeight: 600 }}>{h.name}</div>
+                      <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                        {(h.days || []).length ? h.days.map((d) => DAY_SHORT[d]).join(" ") : "every day"}
+                        {h.start ? " \u00b7 " + fmt12(h.start) : ""}
+                        {h.note ? " \u00b7 " + h.note : ""}
+                      </div>
+                      <div style={{ display: "flex", gap: 3, marginTop: 7 }}>
+                        {(h.week || [0, 0, 0, 0, 0, 0, 0]).map((d, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              width: 7,
+                              height: 7,
+                              borderRadius: "50%",
+                              background: i === 6 && h.tickedToday ? "var(--green)" : d ? "var(--amber)" : "var(--chip)",
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                    {h.streak > 0 && (
+                      <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--amber)" }}>{h.streak}d</div>
+                    )}
+                    <button
+                      onClick={() => tickHabit(h.id)}
+                      className={"check" + (h.tickedToday ? " on" : "")}
+                      style={h.tickedToday ? { background: "var(--green)", borderColor: "var(--green)" } : undefined}
+                    >
+                      {h.tickedToday && <span className="tick" />}
+                    </button>
+                    <button
+                      className="icon-btn"
+                      style={{ width: 24, height: 24, fontSize: 14 }}
+                      onClick={() => {
+                        setHabits((prev) => prev.filter((x) => x.id !== h.id));
+                        setTodayPlan((prev) => prev.filter((b) => b.habitId !== h.id));
+                        setTomorrowPlan((prev) => prev.filter((b) => b.habitId !== h.id));
+                        toast("Deleted routine");
+                      }}
+                    >
+                      &times;
+                    </button>
+                  </div>
+                ))}
               </div>
 
               <div className="card">
@@ -2926,111 +3041,6 @@ Rough one. Dropped the deep work block and moved the call to tonight.
           </div>
         )}
 
-        {tab === "habits" && (
-          <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
-            <div
-              style={{
-                padding: "14px 20px",
-                borderBottom: "1px solid var(--border)",
-                display: "flex",
-                justifyContent: "flex-end",
-              }}
-            >
-              <button onClick={() => setHabitModal({ name: "", freq: "", note: "" })} style={primaryBtn}>
-                + Add
-              </button>
-            </div>
-            <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
-              <div
-                style={{
-                  background: "var(--surface-2)",
-                  borderRadius: 7,
-                  padding: "10px 14px",
-                  fontSize: 11,
-                  color: "var(--muted)",
-                  lineHeight: 1.6,
-                  marginBottom: 14,
-                  borderLeft: "3px solid var(--amber)",
-                }}
-              >
-                These shape how Claude builds your plan. Any frequency works - daily, 3x a week, every other week.
-              </div>
-              {!habits.length && (
-                <div style={{ color: "var(--muted)", fontSize: 12, ...mono, textAlign: "center", padding: "28px 0" }}>
-                  no habits yet
-                </div>
-              )}
-              {habits.map((h) => (
-                <div
-                  key={h.id}
-                  style={{ ...card, padding: "13px 15px", marginBottom: 9, display: "flex", alignItems: "center", gap: 12 }}
-                >
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 14, fontWeight: 500, marginBottom: 4 }}>{h.name}</div>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                      <span
-                        style={{
-                          fontSize: 10,
-                          ...mono,
-                          color: "var(--muted)",
-                          background: "var(--chip)",
-                          padding: "2px 7px",
-                          borderRadius: 99,
-                        }}
-                      >
-                        {h.freq || "custom"}
-                      </span>
-                      {h.note && <span style={{ fontSize: 11, color: "var(--muted)", ...mono }}>{h.note}</span>}
-                    </div>
-                    <div style={{ display: "flex", gap: 3, marginTop: 7 }}>
-                      {(h.week || [0, 0, 0, 0, 0, 0, 0]).map((d, i) => (
-                        <div
-                          key={i}
-                          style={{
-                            width: 7,
-                            height: 7,
-                            borderRadius: "50%",
-                            background: i === 6 && h.tickedToday ? "var(--green)" : d ? "var(--amber)" : "var(--chip)",
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                  {h.streak > 0 && <div style={{ fontSize: 11, ...mono, color: "var(--amber)" }}>{h.streak}d</div>}
-                  <div
-                    onClick={() => tickHabit(h.id)}
-                    style={{
-                      width: 28,
-                      height: 28,
-                      border: `1.5px solid ${h.tickedToday ? "var(--green)" : "var(--border-strong)"}`,
-                      borderRadius: 8,
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      background: h.tickedToday ? "rgba(31,158,106,0.12)" : "none",
-                      color: "var(--green)",
-                      fontSize: 13,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {h.tickedToday ? "\u2713" : ""}
-                  </div>
-                  <button
-                    onClick={() => {
-                      setHabits((prev) => prev.filter((x) => x.id !== h.id));
-                      toast("Deleted habit");
-                    }}
-                    style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 12 }}
-                  >
-                    &times;
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {tab === "ideas" && (
           <div style={{ flex: 1, overflowY: "auto", padding: "16px 20px" }}>
             <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -3371,21 +3381,68 @@ Rough one. Dropped the deep work block and moved the call to tonight.
       )}
 
       {habitModal && (
-        <Modal onClose={() => setHabitModal(null)} title={habitModal.id ? "Edit habit" : "Add habit"}>
-          <Field label="Habit name">
+        <Modal onClose={() => setHabitModal(null)} title={habitModal.id ? "Edit routine" : "Add routine"}>
+          <Field label="Routine name">
             <input
               value={habitModal.name}
               onChange={(e) => setHabitModal((m) => ({ ...m, name: e.target.value }))}
               placeholder="e.g. Read 20 minutes"
             />
           </Field>
-          <Field label="Frequency">
-            <input
-              value={habitModal.freq}
-              onChange={(e) => setHabitModal((m) => ({ ...m, freq: e.target.value }))}
-              placeholder="daily / 3x per week / every other week"
-            />
+          <Field label="Days">
+            <div style={{ display: "flex", gap: 5 }}>
+              {DAY_SHORT.map((d, i) => {
+                const on = (habitModal.days || []).includes(i);
+                return (
+                  <button
+                    key={d}
+                    onClick={() =>
+                      setHabitModal((m) => ({
+                        ...m,
+                        days: on ? (m.days || []).filter((x) => x !== i) : [...(m.days || []), i],
+                      }))
+                    }
+                    style={{
+                      flex: 1,
+                      padding: "9px 0",
+                      fontSize: 11.5,
+                      fontFamily: "inherit",
+                      borderRadius: 8,
+                      cursor: "pointer",
+                      border: `1px solid ${on ? "var(--accent)" : "var(--border)"}`,
+                      background: on ? "var(--accent-soft)" : "none",
+                      color: on ? "var(--accent)" : "var(--muted)",
+                    }}
+                  >
+                    {d}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
+              Leave all off to have it show up every day.
+            </div>
           </Field>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <Field label="Time (optional)">
+                <input
+                  type="time"
+                  value={habitModal.start || ""}
+                  onChange={(e) => setHabitModal((m) => ({ ...m, start: e.target.value }))}
+                />
+              </Field>
+            </div>
+            <div style={{ flex: 1 }}>
+              <Field label="Until (optional)">
+                <input
+                  type="time"
+                  value={habitModal.end || ""}
+                  onChange={(e) => setHabitModal((m) => ({ ...m, end: e.target.value }))}
+                />
+              </Field>
+            </div>
+          </div>
           <Field label="Note (optional)">
             <input
               value={habitModal.note}
@@ -3399,7 +3456,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
               const name = habitModal.name.trim();
               if (!name) return;
               if (!habitModal.id && habits.some((h) => norm(h.name) === norm(name))) {
-                toast("That habit already exists");
+                toast("That routine already exists");
                 setHabitModal(null);
                 return;
               }
