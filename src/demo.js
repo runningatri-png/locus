@@ -93,6 +93,14 @@ const ideas = [
   { id: "d-i6", t: "Ask the planner to defend its schedule, then argue with it" },
 ];
 
+// Fixed weekly commitments - these place themselves on any matching day.
+const commitments = [
+  { id: "d-c-fin", label: "FIN 445 lecture", kind: "class", days: [1, 3, 5], start: "13:00", end: "13:50", note: "Gatton 191" },
+  { id: "d-c-tut", label: "Tutoring shift", kind: "work", days: [2, 4], start: "14:00", end: "18:00", note: "" },
+  { id: "d-c-gym", label: "Lift", kind: "gym", days: [1, 3, 5, 6, 0], start: "10:15", end: "12:00", note: "" },
+  { id: "d-c-chap", label: "Chapter meeting", kind: "other", days: [2], start: "19:00", end: "20:00", note: "every other week" },
+];
+
 const todayPlan = [
   { id: "d-b1", time: "7:30 AM", duration: "60 min", title: "Lift - upper body", desc: "Push day, then protein shake", imp: 2, done: true },
   { id: "d-b2", time: "9:00 AM", duration: "75 min", title: "CS 218 lecture", desc: "Process scheduling and signals", imp: 2, done: true },
@@ -183,10 +191,10 @@ const timestamps = {
 };
 
 const context = [
-  "Evening blocks after 8pm get skipped more often than any other slot.",
-  "Internship search consistently takes about 45 minutes, not the 60 it gets scheduled for.",
-  "Lab writeups run 15% over their estimate - budget accordingly the week something is due.",
-  "Tutoring on Tuesdays tends to overrun and eats the block right after it.",
+  { date: "Sep 18", text: "Evening blocks after 8pm get skipped more often than any other slot." },
+  { date: "Sep 20", text: "Internship search consistently takes about 45 minutes, not the 60 it gets scheduled for." },
+  { date: "Sep 21", text: "Lab writeups run 15% over their estimate - budget accordingly the week something is due." },
+  { date: "Sep 23", text: "Tutoring on Tuesdays tends to overrun and eats the block right after it." },
 ];
 
 // Keyed by the same localStorage keys the app already uses, so demo mode is a
@@ -196,6 +204,8 @@ export const DEMO_STATE = {
   "locus-tasks": tasks,
   "locus-habits": habits,
   "locus-ideas": ideas,
+  "locus-commitments": commitments,
+  "locus-fixed-dismissed": {},
   "locus-today-plan": todayPlan,
   "locus-tomorrow-plan": tomorrowPlan,
   "locus-tomorrow-date": iso(1),

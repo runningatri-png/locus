@@ -63,22 +63,43 @@ const MAPPERS = {
     toRow: (i) => ({ id: i.id, t: i.t || "" }),
     toApp: (r) => ({ id: r.id, t: r.t }),
   },
+  commitments: {
+    toRow: (c) => ({
+      id: c.id,
+      label: c.label || "",
+      kind: c.kind || "other",
+      days: Array.isArray(c.days) ? c.days : [],
+      start_time: c.start || "",
+      end_time: c.end || "",
+      note: c.note || "",
+    }),
+    toApp: (r) => ({
+      id: r.id,
+      label: r.label,
+      kind: r.kind,
+      days: r.days || [],
+      start: r.start_time || "",
+      end: r.end_time || "",
+      note: r.note || "",
+    }),
+  },
 };
 
 export const ITEM_TABLES = Object.keys(MAPPERS);
 
 /** Everything the app needs, in one round trip per table. */
 export async function pullAll() {
-  const [goals, tasks, habits, ideas, days, docs] = await Promise.all([
+  const [goals, tasks, habits, ideas, commitments, days, docs] = await Promise.all([
     supabase.from("goals").select("*"),
     supabase.from("tasks").select("*"),
     supabase.from("habits").select("*"),
     supabase.from("ideas").select("*"),
+    supabase.from("commitments").select("*"),
     supabase.from("plan_days").select("*"),
     supabase.from("docs").select("*"),
   ]);
 
-  const err = [goals, tasks, habits, ideas, days, docs].find((r) => r.error);
+  const err = [goals, tasks, habits, ideas, commitments, days, docs].find((r) => r.error);
   if (err) throw err.error;
 
   const planArchive = {};
@@ -92,11 +113,13 @@ export async function pullAll() {
     tasks: tasks.data.map(MAPPERS.tasks.toApp),
     habits: habits.data.map(MAPPERS.habits.toApp),
     ideas: ideas.data.map(MAPPERS.ideas.toApp),
+    commitments: commitments.data.map(MAPPERS.commitments.toApp),
     planArchive,
     history: doc.history || [],
     skipPatterns: doc.skipPatterns || {},
     timestamps: doc.timestamps || {},
     context: doc.context || [],
+    fixedDismissed: doc.fixedDismissed || {},
   };
 }
 
@@ -141,6 +164,7 @@ export function isEmptyState(s) {
     (s.tasks || []).length ||
     (s.habits || []).length ||
     (s.ideas || []).length ||
+    (s.commitments || []).length ||
     Object.keys(s.planArchive || {}).length
   );
 }

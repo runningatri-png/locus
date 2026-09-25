@@ -16,6 +16,8 @@ const KEYS = {
   timestamps: "locus-timestamps",
   context: "locus-context",
   planArchive: "locus-plan-archive",
+  commitments: "locus-commitments",
+  fixedDismissed: "locus-fixed-dismissed",
   lastOpen: "locus-last-open",
 };
 
@@ -48,6 +50,61 @@ function daysBetween(aKey, bKey) {
   const a = new Date(aKey + "T12:00:00");
   const b = new Date(bKey + "T12:00:00");
   return Math.round((b - a) / 86400000);
+}
+
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const DAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/** "13:05" -> "1:05 PM". Anything unparseable comes back untouched. */
+function fmt12(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec((hhmm || "").trim());
+  if (!m) return hhmm || "";
+  let h = Number(m[1]);
+  const suffix = h >= 12 ? "PM" : "AM";
+  h = h % 12 || 12;
+  return `${h}:${m[2]} ${suffix}`;
+}
+
+/** Minutes since midnight, for ordering a day. Null when there's no clock time. */
+function minutesOf(label) {
+  const m = /^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i.exec((label || "").trim());
+  if (!m) return null;
+  let h = Number(m[1]);
+  const ampm = (m[3] || "").toUpperCase();
+  if (ampm === "PM" && h !== 12) h += 12;
+  if (ampm === "AM" && h === 12) h = 0;
+  return h * 60 + Number(m[2]);
+}
+
+/** Clock-timed blocks in order; phase-labelled ones keep their existing order after. */
+function sortPlan(blocks) {
+  return [...blocks]
+    .map((b, i) => ({ b, i, m: minutesOf(b.time) }))
+    .sort((x, y) => (x.m === null) - (y.m === null) || (x.m ?? 0) - (y.m ?? 0) || x.i - y.i)
+    .map((x) => x.b);
+}
+
+function durationLabel(start, end) {
+  const a = minutesOf(fmt12(start));
+  const b = minutesOf(fmt12(end));
+  if (a === null || b === null || b <= a) return "";
+  return b - a + " min";
+}
+
+/** Accepts [1,3], ["Mon","Wed"], "Mon, Wed", "MWF" - the model won't be consistent. */
+function parseDays(v) {
+  if (Array.isArray(v) && v.every((d) => typeof d === "number")) return v.filter((d) => d >= 0 && d <= 6);
+  const text = (Array.isArray(v) ? v.join(",") : String(v || "")).toLowerCase();
+  const out = [];
+  DAY_SHORT.forEach((short, i) => {
+    if (text.includes(short.toLowerCase()) || text.includes(DAY_NAMES[i].toLowerCase())) out.push(i);
+  });
+  if (out.length) return [...new Set(out)];
+  if (/^[mtwrfsu]+$/.test(text.replace(/[^a-z]/g, ""))) {
+    const map = { m: 1, t: 2, w: 3, r: 4, f: 5, s: 6, u: 0 };
+    return [...new Set(text.replace(/[^a-z]/g, "").split("").map((c) => map[c]).filter((d) => d !== undefined))];
+  }
+  return [];
 }
 
 function uid() {
@@ -136,7 +193,27 @@ function splitReply(raw) {
   return { message, actions: [] };
 }
 
-function buildContext({ goals, tasks, habits, ideas, skipPatterns, timestamps, context }) {
+/**
+ * Two context notes are "the same topic" when they open the same way -
+ * "Study blocks: ...", "Weekly schedule - ...". Corrections used to pile up as
+ * near-identical notes (eight versions of one timetable, five of them stale and
+ * contradictory in the prompt), because the only dedupe was exact-text match.
+ * A new note on a known topic now replaces the old one instead of joining it.
+ */
+function sameTopic(a, b) {
+  const key = (t) =>
+    norm(t)
+      .replace(/^[a-z]{3} \d{1,2}: /, "")
+      .split(/[\s,;:-]+/)
+      .filter(Boolean)
+      .slice(0, 3)
+      .join(" ");
+  const ka = key(a);
+  const kb = key(b);
+  return ka.length > 6 && ka === kb;
+}
+
+function buildContext({ goals, tasks, habits, ideas, commitments, skipPatterns, timestamps, context }) {
   const ord = ["front", "maint", "back"];
   const sorted = [...goals].sort((a, b) => ord.indexOf(a.p) - ord.indexOf(b.p));
   const group = (p) => {
@@ -188,7 +265,20 @@ function buildContext({ goals, tasks, habits, ideas, skipPatterns, timestamps, c
       .map(([k, v]) => `- ${k}: usually takes about ${v.avg} min (${v.count} logged)`)
       .join("\n") || "None yet";
 
-  const ctxNotes = context.slice(0, 5).map((c) => `- ${c.date}: ${c.text}`).join("\n") || "None";
+  const ctxNotes = context.slice(0, 10).map((c) => `- ${c.date}: ${c.text}`).join("\n") || "None";
+
+  const byDay = (Array.isArray(commitments) ? commitments : []).reduce((acc, c) => {
+    (c.days || []).forEach((d) => {
+      (acc[d] = acc[d] || []).push(`${c.label} ${fmt12(c.start)}-${fmt12(c.end)}${c.note ? " (" + c.note + ")" : ""}`);
+    });
+    return acc;
+  }, {});
+  const commitCtx =
+    Object.keys(byDay).length === 0
+      ? "None recorded"
+      : DAY_NAMES.map((name, i) => (byDay[i] ? `- ${name}: ${byDay[i].join("; ")}` : null))
+          .filter(Boolean)
+          .join("\n");
 
   const today = new Date();
   const tmr = new Date(today.getTime() + 86400000);
@@ -208,6 +298,10 @@ ${group("maint")}
 
 GOALS - back burner:
 ${group("back")}
+
+FIXED WEEKLY COMMITMENTS (immovable - class, work, standing obligations):
+${commitCtx}
+These are placed on the day automatically. Never add_block for them, and never schedule anything that overlaps one.
 
 PENDING TASKS:
 ${taskCtx}
@@ -292,6 +386,11 @@ export default function App() {
   const [skipPatterns, setSkipPatterns] = useState(() => load(KEYS.skipPatterns, {}));
   const [timestamps, setTimestamps] = useState(() => load(KEYS.timestamps, {}));
   const [context, setContext] = useState(() => load(KEYS.context, []));
+  const [commitments, setCommitments] = useState(() => load(KEYS.commitments, []));
+  // Fixed blocks removed from one specific day: { "2026-09-25": [commitmentId] }.
+  // They stay gone for that day and come back the following week.
+  const [fixedDismissed, setFixedDismissed] = useState(() => load(KEYS.fixedDismissed, {}));
+  const [commitModal, setCommitModal] = useState(null);
 
   const [tomorrowSuggestions, setTomorrowSuggestions] = useState([]);
   const [selectedSuggestions, setSelectedSuggestions] = useState([]);
@@ -352,6 +451,8 @@ export default function App() {
   useEffect(() => save(KEYS.timestamps, timestamps), [timestamps]);
   useEffect(() => save(KEYS.context, context), [context]);
   useEffect(() => save(KEYS.planArchive, planArchive), [planArchive]);
+  useEffect(() => save(KEYS.commitments, commitments), [commitments]);
+  useEffect(() => save(KEYS.fixedDismissed, fixedDismissed), [fixedDismissed]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -371,6 +472,8 @@ export default function App() {
     setTasks(remote.tasks);
     setHabits(remote.habits);
     setIdeas(remote.ideas);
+    setCommitments(remote.commitments || []);
+    setFixedDismissed(remote.fixedDismissed || {});
     setPlanArchive(remote.planArchive);
     setTodayPlan(remote.planArchive[todayK] || []);
     setTomorrowPlan(remote.planArchive[tomorrowK] || []);
@@ -406,6 +509,8 @@ export default function App() {
             pushItems("tasks", tasks, uid),
             pushItems("habits", habits, uid),
             pushItems("ideas", ideas, uid),
+            pushItems("commitments", commitments, uid),
+            pushDoc("fixedDismissed", fixedDismissed, uid),
             pushPlanDay(todayK, todayPlan, uid),
             pushPlanDay(tomorrowK, tomorrowPlan, uid),
             pushDoc("history", history, uid),
@@ -449,6 +554,8 @@ export default function App() {
   useEffect(() => queuePush("skips", (uid) => pushDoc("skipPatterns", skipPatterns, uid)), [skipPatterns]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => queuePush("times", (uid) => pushDoc("timestamps", timestamps, uid)), [timestamps]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => queuePush("context", (uid) => pushDoc("context", context, uid)), [context]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("commitments", (uid) => pushItems("commitments", commitments, uid)), [commitments]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => queuePush("dismissed", (uid) => pushDoc("fixedDismissed", fixedDismissed, uid)), [fixedDismissed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Coming back to the tab pulls whatever the other device did while away.
   // Skipped if a local edit is still waiting to be written, so returning focus
@@ -671,8 +778,28 @@ export default function App() {
       if (prev.some((c) => norm(c.text) === norm(text))) return prev;
       return [
         { date: new Date().toLocaleDateString("en-US", { month: "short", day: "numeric" }), text },
-        ...prev,
+        ...prev.filter((c) => !sameTopic(c.text, text)),
       ].slice(0, 12);
+    });
+  };
+
+  // Corrections need a way to change a note, not just add another one.
+  const editContext = (match, text) => {
+    if (!match || !text) return;
+    setContext((prev) => {
+      const i = prev.findIndex((c) => norm(c.text).includes(norm(match)));
+      if (i === -1) return prev;
+      const next = [...prev];
+      next[i] = { ...next[i], text };
+      return next;
+    });
+  };
+
+  const deleteContext = (match) => {
+    if (!match) return;
+    setContext((prev) => {
+      const i = prev.findIndex((c) => norm(c.text).includes(norm(match)));
+      return i === -1 ? prev : prev.filter((_, j) => j !== i);
     });
   };
 
@@ -864,6 +991,44 @@ export default function App() {
           if (a.text) noteContext(a.text);
           break;
         }
+        case "add_commitment": {
+          const label = (a.label || "").trim();
+          const days = parseDays(a.days);
+          if (!label || !days.length) break;
+          setCommitments((prev) =>
+            prev.some((c) => norm(c.label) === norm(label) && String(c.days) === String(days))
+              ? prev
+              : [
+                  ...prev,
+                  { id: uid(), label, kind: a.kind || "other", days, start: a.start || "", end: a.end || "", note: a.note || "" },
+                ]
+          );
+          toast("Added commitment");
+          break;
+        }
+        case "edit_commitment": {
+          const u = a.updates || {};
+          setCommitments((prev) =>
+            prev.map((c) =>
+              norm(c.label) === norm(a.label || "") ? { ...c, ...u, days: u.days ? parseDays(u.days) : c.days } : c
+            )
+          );
+          toast("Updated commitment");
+          break;
+        }
+        case "delete_commitment": {
+          setCommitments((prev) => prev.filter((c) => norm(c.label) !== norm(a.label || "")));
+          toast("Deleted commitment");
+          break;
+        }
+        case "edit_context": {
+          editContext(a.match, a.text);
+          break;
+        }
+        case "delete_context": {
+          deleteContext(a.match);
+          break;
+        }
         case "add_block": {
           if (!a.title) break;
           setTodayPlan((prev) => {
@@ -1011,6 +1176,7 @@ imp is 1, 2, or 3.`;
       tasks: src.ts,
       habits: src.hs,
       ideas: src.is,
+      commitments,
       skipPatterns,
       timestamps,
       context,
@@ -1044,7 +1210,7 @@ imp is 1, 2, or 3.`;
 
   async function loadSuggestions() {
     setSugLoading(true);
-    const ctx = buildContext({ goals, tasks, habits, ideas, skipPatterns, timestamps, context });
+    const ctx = buildContext({ goals, tasks, habits, ideas, commitments, skipPatterns, timestamps, context });
     try {
       const text = await callClaude(
         `You suggest what the user could do tomorrow.\n\n${ctx}\n\nGive 6 to 8 short suggestion cards. Mix front burner goal work, pending tasks that matter, anything time sensitive, and recovery or social if neglected. Never suggest a habit that is not in the HABITS list. Respond with ONLY a JSON array, no prose:\n[{"title":"...","desc":"...","type":"goal|task|social|recovery|other","imp":1}]`,
@@ -1112,7 +1278,7 @@ imp is 1, 2, or 3.`;
     setChatHistory(nextHistory);
     setChatLoading(true);
 
-    const ctx = buildContext({ goals, tasks, habits, ideas, skipPatterns, timestamps, context });
+    const ctx = buildContext({ goals, tasks, habits, ideas, commitments, skipPatterns, timestamps, context });
     const wantsSearch =
       /\b(search|look up|find me|google|near me|events?|festival|concert|news|latest|current|who is|what's happening)\b/i.test(
         msg
@@ -1146,7 +1312,12 @@ ACTIONS:
 {"type":"delete_habit","name"}
 {"type":"add_idea","text"}
 {"type":"delete_idea","text"}
+{"type":"add_commitment","label","kind":"class|work|gym|other","days":["Mon","Wed"],"start":"13:00","end":"13:50","note"}
+{"type":"edit_commitment","label","updates":{"start":"14:00","days":["Mon"]}}
+{"type":"delete_commitment","label"}
 {"type":"add_context","text"}
+{"type":"edit_context","match":"distinctive words from the note you are correcting","text":"the corrected note"}
+{"type":"delete_context","match":"distinctive words from the note to remove"}
 {"type":"add_block","time":"Morning|Late morning|Midday|Afternoon|Evening|Night","title","desc","duration":"~30 min","imp":1|2|3}
 {"type":"remove_block","title"}
 {"type":"edit_block","title","updates":{"time":"...","desc":"...","duration":"..."}}
@@ -1166,6 +1337,9 @@ HARD RULES:
 4. Never emit an action with an empty name or text field.
 5. When the user shares stress, mood, or life circumstances, capture it with add_context so future plans account for it.
 6. Be direct and specific. Reference their real goals by name. Confirm exactly what you changed.
+7. A recurring class, shift or standing obligation is a COMMITMENT - not a context note and not a habit. Use add_commitment; it places itself on every matching day automatically. Times in 24h ("13:00"). Never restate a weekly schedule as prose in add_context.
+8. When a context note is now wrong, correct it with edit_context or remove it with delete_context. NEVER add a second note that contradicts one already in LIFE CONTEXT NOTES - the old one does not disappear, and you will then be reading both.
+9. Saying you saved, updated or fixed something without emitting the matching action is a lie to the user. Emit the action.
 
 Example (small addition - no regenerate):
 Added a call with Alex to this evening.
@@ -1277,6 +1451,66 @@ Rough one. Dropped the deep work block and moved the call to tonight.
       : planArchive[calSelected] || [];
   const selectedHistory = history.find((h) => h.key === calSelected || h.date === prettyDate(selectedDateObj));
 
+  // Fixed commitments place themselves on today and tomorrow. No approval step:
+  // class happens whether or not the plan acknowledges it. Matching is by src, so
+  // re-running is idempotent, and a block removed for one day stays removed only
+  // for that day.
+  const blockFor = (c) => ({
+    id: uid(),
+    src: c.id,
+    fixed: true,
+    time: fmt12(c.start),
+    duration: durationLabel(c.start, c.end),
+    title: c.label,
+    desc: c.note || "",
+    imp: 2,
+    done: false,
+    status: "pending",
+    startTime: null,
+  });
+
+  const placeFixed = (dayKey, setPlan) => {
+    const dow = new Date(dayKey + "T12:00:00").getDay();
+    const skip = fixedDismissed[dayKey] || [];
+    setPlan((prev) => {
+      const present = new Set(prev.filter((b) => b.src).map((b) => b.src));
+      const add = commitments
+        .filter((c) => (c.days || []).includes(dow) && !present.has(c.id) && !skip.includes(c.id))
+        .map(blockFor);
+      return add.length ? sortPlan([...prev, ...add]) : prev;
+    });
+  };
+
+  useEffect(() => {
+    if (!commitments.length) return;
+    placeFixed(todayK, setTodayPlan);
+    placeFixed(tomorrowK, setTomorrowPlan);
+  }, [commitments, fixedDismissed, todayK, tomorrowK]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dropFixedForDay = (block, dayKey) => {
+    setTodayPlan((prev) => prev.filter((b) => b.id !== block.id));
+    if (block.src)
+      setFixedDismissed((prev) => ({ ...prev, [dayKey]: [...(prev[dayKey] || []), block.src] }));
+    toast("Removed for today - back next week");
+  };
+
+  const saveCommitment = (c) => {
+    const label = (c.label || "").trim();
+    if (!label || !(c.days || []).length) return;
+    setCommitments((prev) =>
+      c.id ? prev.map((x) => (x.id === c.id ? { ...c, label } : x)) : [...prev, { ...c, label, id: uid() }]
+    );
+    setCommitModal(null);
+  };
+
+  const deleteCommitment = (id) => {
+    setCommitments((prev) => prev.filter((c) => c.id !== id));
+    // and pull its blocks off the days it already populated
+    setTodayPlan((prev) => prev.filter((b) => b.src !== id));
+    setTomorrowPlan((prev) => prev.filter((b) => b.src !== id));
+    toast("Deleted commitment");
+  };
+
   const dayHasData = (k) => {
     if (k === todayK && todayPlan.length) return true;
     if (k === tomorrowK && tomorrowPlan.length) return true;
@@ -1351,6 +1585,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
       items: [
         { id: "today", label: "Today", icon: "home" },
         { id: "calendar", label: "Calendar", icon: "calendar" },
+        { id: "schedule", label: "Schedule", icon: "grid", badge: commitments.length },
         { id: "tomorrow", label: "Plan", icon: "target" },
         { id: "ideas", label: "Ideas", icon: "bulb", badge: ideas.length },
       ],
@@ -1759,6 +1994,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       onSkip={skipBlock}
                       onReschedule={setRescheduleId}
                       onStart={startBlock}
+                      onDelete={(blk) => dropFixedForDay(blk, todayK)}
                       skipCount={skipPatterns[b.title] || 0}
                     />
                   ))}
@@ -1788,6 +2024,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                       onSkip={skipBlock}
                       onReschedule={setRescheduleId}
                       onStart={startBlock}
+                      onDelete={(blk) => dropFixedForDay(blk, todayK)}
                       skipCount={skipPatterns[b.title] || 0}
                     />
                   ))}
@@ -1830,6 +2067,123 @@ Rough one. Dropped the deep work block and moved the call to tonight.
             </div>
           </div>
         )}
+        {tab === "schedule" && (
+          <div className="scroll" style={{ flex: 1 }}>
+            <div className="pad" style={{ maxWidth: 780 }}>
+              <div className="card" style={{ marginBottom: 18 }}>
+                <div className="card-head">
+                  <div className="card-title">Weekly commitments</div>
+                  <button
+                    className="btn btn-primary"
+                    style={{ marginLeft: "auto" }}
+                    onClick={() => setCommitModal({ label: "", kind: "class", days: [], start: "", end: "", note: "" })}
+                  >
+                    + Add
+                  </button>
+                </div>
+                <div style={{ padding: "0 18px 10px", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
+                  These place themselves on every matching day, no approval needed. The planner treats them as
+                  immovable and never schedules over them.
+                </div>
+                {!commitments.length && (
+                  <div style={{ padding: "8px 18px 20px", fontSize: 13, color: "var(--muted)" }}>
+                    Nothing yet. Add a class or a shift, or just tell Chat and it'll fill these in.
+                  </div>
+                )}
+                {DAY_NAMES.map((dayName, d) => {
+                  const list = commitments
+                    .filter((c) => (c.days || []).includes(d))
+                    .sort((a, b) => (minutesOf(fmt12(a.start)) ?? 0) - (minutesOf(fmt12(b.start)) ?? 0));
+                  if (!list.length) return null;
+                  return (
+                    <div key={dayName} style={{ borderTop: "1px solid var(--border)", padding: "12px 18px" }}>
+                      <div style={{ ...sectionLabel, marginBottom: 8 }}>{dayName}</div>
+                      {list.map((c) => (
+                        <div
+                          key={c.id + dayName}
+                          onClick={() => setCommitModal(c)}
+                          style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", cursor: "pointer" }}
+                        >
+                          <div style={{ width: 128, flexShrink: 0, fontSize: 12, color: "var(--muted)" }}>
+                            {fmt12(c.start)}
+                            {c.end ? " - " + fmt12(c.end) : ""}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 550 }}>{c.label}</div>
+                          <span className="pill" style={{ background: "var(--chip)", color: "var(--muted)" }}>
+                            {c.kind}
+                          </span>
+                          <button
+                            className="icon-btn"
+                            style={{ width: 24, height: 24, fontSize: 14 }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (window.confirm(`Delete "${c.label}" from every ${dayName}?`)) deleteCommitment(c.id);
+                            }}
+                          >
+                            &times;
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="card">
+                <div className="card-head">
+                  <div className="card-title">What Locus remembers</div>
+                  <div style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--muted)" }}>
+                    {context.length} note{context.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+                <div style={{ padding: "0 18px 10px", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
+                  Notes it keeps about your life and sends with every plan. The 10 most recent are used.
+                </div>
+                {!context.length && (
+                  <div style={{ padding: "8px 18px 20px", fontSize: 13, color: "var(--muted)" }}>Nothing noted yet.</div>
+                )}
+                {context.map((c, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      borderTop: "1px solid var(--border)",
+                      padding: "11px 18px",
+                      display: "flex",
+                      gap: 10,
+                      alignItems: "flex-start",
+                      opacity: i < 10 ? 1 : 0.45,
+                    }}
+                  >
+                    <div style={{ fontSize: 11, color: "var(--muted-2)", width: 52, flexShrink: 0, paddingTop: 2 }}>
+                      {c.date}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6 }}>{c.text}</div>
+                    <button
+                      className="icon-btn"
+                      style={{ width: 24, height: 24, fontSize: 13, flexShrink: 0 }}
+                      title="Edit"
+                      onClick={() => {
+                        const next = window.prompt("Edit this note:", c.text);
+                        if (next && next.trim())
+                          setContext((prev) => prev.map((x, j) => (j === i ? { ...x, text: next.trim() } : x)));
+                      }}
+                    >
+                      &#9998;
+                    </button>
+                    <button
+                      className="icon-btn"
+                      style={{ width: 24, height: 24, fontSize: 14, flexShrink: 0 }}
+                      onClick={() => setContext((prev) => prev.filter((_, j) => j !== i))}
+                    >
+                      &times;
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
         {tab === "tomorrow" && (
           <div style={{ display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }}>
             {/* --- header: date, planned-state, segment switch --- */}
@@ -2246,6 +2600,31 @@ Rough one. Dropped the deep work block and moved the call to tonight.
               {selectedDateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
               {calSelected === todayK ? " - today" : calSelected === tomorrowK ? " - tomorrow" : ""}
             </div>
+
+            {(() => {
+              const dow = selectedDateObj.getDay();
+              const fixed = commitments
+                .filter((c) => (c.days || []).includes(dow))
+                .sort((a, b) => (minutesOf(fmt12(a.start)) ?? 0) - (minutesOf(fmt12(b.start)) ?? 0));
+              if (!fixed.length) return null;
+              return (
+                <div style={{ ...card, padding: "12px 14px", marginBottom: 12 }}>
+                  <div style={{ ...sectionLabel, marginBottom: 8 }}>Every {DAY_NAMES[dow]}</div>
+                  {fixed.map((c) => (
+                    <div key={c.id} style={{ display: "flex", gap: 10, alignItems: "center", padding: "4px 0" }}>
+                      <div style={{ width: 118, flexShrink: 0, fontSize: 11.5, color: "var(--muted)" }}>
+                        {fmt12(c.start)}
+                        {c.end ? " - " + fmt12(c.end) : ""}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{c.label}</div>
+                      <span className="pill" style={{ background: "var(--chip)", color: "var(--muted)" }}>
+                        {c.kind}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
 
             {!selectedPlan.length && !selectedHistory && (
               <div style={{ color: "var(--muted)", fontSize: 12, ...mono, padding: "12px 0" }}>
@@ -2763,6 +3142,84 @@ Rough one. Dropped the deep work block and moved the call to tonight.
         )}
       </div>
 
+      {commitModal && (
+        <Modal onClose={() => setCommitModal(null)} title={commitModal.id ? "Edit commitment" : "Add commitment"}>
+          <Field label="What is it">
+            <input
+              value={commitModal.label}
+              onChange={(e) => setCommitModal((m) => ({ ...m, label: e.target.value }))}
+              placeholder="e.g. ACC 301 lecture"
+            />
+          </Field>
+          <Field label="Type">
+            <select value={commitModal.kind} onChange={(e) => setCommitModal((m) => ({ ...m, kind: e.target.value }))}>
+              {["class", "work", "gym", "other"].map((k) => (
+                <option key={k}>{k}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Days">
+            <div style={{ display: "flex", gap: 5 }}>
+              {DAY_SHORT.map((d, i) => {
+                const on = (commitModal.days || []).includes(i);
+                return (
+                  <button
+                    key={d}
+                    onClick={() =>
+                      setCommitModal((m) => ({
+                        ...m,
+                        days: on ? m.days.filter((x) => x !== i) : [...(m.days || []), i],
+                      }))
+                    }
+                    style={{
+                      flex: 1,
+                      padding: "9px 0",
+                      fontSize: 11.5,
+                      fontFamily: "inherit",
+                      borderRadius: 8,
+                      cursor: "pointer",
+                      border: `1px solid ${on ? "var(--accent)" : "var(--border)"}`,
+                      background: on ? "var(--accent-soft)" : "none",
+                      color: on ? "var(--accent)" : "var(--muted)",
+                    }}
+                  >
+                    {d}
+                  </button>
+                );
+              })}
+            </div>
+          </Field>
+          <div style={{ display: "flex", gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <Field label="Starts">
+                <input
+                  type="time"
+                  value={commitModal.start}
+                  onChange={(e) => setCommitModal((m) => ({ ...m, start: e.target.value }))}
+                />
+              </Field>
+            </div>
+            <div style={{ flex: 1 }}>
+              <Field label="Ends">
+                <input
+                  type="time"
+                  value={commitModal.end}
+                  onChange={(e) => setCommitModal((m) => ({ ...m, end: e.target.value }))}
+                />
+              </Field>
+            </div>
+          </div>
+          <Field label="Note (optional)">
+            <input
+              value={commitModal.note}
+              onChange={(e) => setCommitModal((m) => ({ ...m, note: e.target.value }))}
+              placeholder="room, who with, anything useful"
+            />
+          </Field>
+          <ModalActions onCancel={() => setCommitModal(null)} onSave={() => saveCommitment(commitModal)} />
+        </Modal>
+      )}
+
       {goalModal && (
         <Modal onClose={() => setGoalModal(null)} title={goalModal.id ? "Edit goal" : "Add goal"}>
           <Field label="Goal name">
@@ -2985,7 +3442,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
 }
 
 
-function PlanBlock({ block, cat, tint, onToggle, onSkip, onReschedule, onStart, skipCount }) {
+function PlanBlock({ block, cat, tint, onToggle, onSkip, onReschedule, onStart, onDelete, skipCount }) {
   const [menuOpen, setMenuOpen] = useState(false);
 
   // Close on any click elsewhere. Registered a tick late so the click that
@@ -3041,6 +3498,14 @@ function PlanBlock({ block, cat, tint, onToggle, onSkip, onReschedule, onStart, 
             {c.label}
           </span>
         </div>
+
+        {block.fixed && (
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <span className="pill" style={{ background: "var(--chip)", color: "var(--muted)" }}>
+              fixed
+            </span>
+          </div>
+        )}
 
         {badges.length > 0 && (
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
@@ -3105,6 +3570,9 @@ function PlanBlock({ block, cat, tint, onToggle, onSkip, onReschedule, onStart, 
             {[
               ["Skip", () => setShowSkip(true)],
               ["Move", () => onReschedule(block.id)],
+              // A fixed block can be cleared off one day - a cancelled class -
+              // without touching the standing commitment behind it.
+              ...(block.fixed && onDelete ? [["Remove from today", () => onDelete(block)]] : []),
             ].map(([label, fn]) => (
               <button
                 key={label}
@@ -3304,6 +3772,7 @@ const ICONS = {
   folder: '<path d="M3 6.6A1.6 1.6 0 0 1 4.6 5h4L11 7.6h8.4A1.6 1.6 0 0 1 21 9.2v9.2a1.6 1.6 0 0 1-1.6 1.6H4.6A1.6 1.6 0 0 1 3 18.4z"/>',
   star: '<path d="m12 3.2 2.6 5.5 6 .9-4.3 4.2 1 6-5.3-2.8-5.3 2.8 1-6L3.4 9.6l6-.9z"/>',
   dot: '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2.6" fill="currentColor" stroke="none"/>',
+  grid: '<rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M3 9.5h18M9 9.5V20M15 9.5V20"/>',
   sparkle: '<path d="m12 3 1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>',
   sun: '<circle cx="12" cy="12" r="4.2"/><path d="M12 2.4v2.1M12 19.5v2.1M4.6 4.6l1.5 1.5M17.9 17.9l1.5 1.5M2.4 12h2.1M19.5 12h2.1M4.6 19.4l1.5-1.5M17.9 6.1l1.5-1.5"/>',
   moon: '<path d="M20.2 14.6A8.6 8.6 0 0 1 9.4 3.8a8.6 8.6 0 1 0 10.8 10.8z"/>',
