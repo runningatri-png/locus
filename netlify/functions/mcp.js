@@ -54,6 +54,43 @@ function freshness(updatedAt) {
   return `${Math.round(hrs / 24)}d ago`
 }
 
+// --- Matching items the caller named ---------------------------------------
+// Every delete/edit tool resolves what the caller meant against the snapshot
+// BEFORE queueing anything, and queues the resolved id rather than the name.
+// Two reasons: a name that matched nothing can be reported as an error instead
+// of silently succeeding, and a name that matched two things can be refused
+// instead of deleting the wrong one.
+const norm = (v) => String(v == null ? '' : v).trim().toLowerCase()
+
+function labelOf(item, field) {
+  return item[field] || '(untitled)'
+}
+
+// Returns { id, name } on a clean single match, or { error } otherwise.
+function resolveOne(list, args, field, noun) {
+  const items = Array.isArray(list) ? list : []
+  if (args.id) {
+    const hit = items.find((i) => i.id === args.id)
+    if (!hit) return { error: `No ${noun} in Locus has id "${args.id}". Call the matching get_ tool to see current ids.` }
+    return { id: hit.id, name: labelOf(hit, field) }
+  }
+  const q = norm(args.name || args.text || args.title)
+  if (!q) return { error: `Give either an id or a name to say which ${noun} you mean.` }
+
+  let hits = items.filter((i) => norm(i[field]) === q)
+  if (!hits.length) hits = items.filter((i) => norm(i[field]).includes(q))
+  if (!hits.length) {
+    return { error: `No ${noun} in Locus matches "${args.name || args.text || args.title}". Nothing was changed.` }
+  }
+  if (hits.length > 1) {
+    const opts = hits.map((h) => `- ${labelOf(h, field)} (id: ${h.id})`).join('\n')
+    return {
+      error: `"${args.name || args.text || args.title}" matches ${hits.length} ${noun}s in Locus. Nothing was changed - call again with one of these ids:\n${opts}`,
+    }
+  }
+  return { id: hits[0].id, name: labelOf(hits[0], field) }
+}
+
 const READ_TOOLS = [
   {
     name: 'get_today',
@@ -78,6 +115,11 @@ const READ_TOOLS = [
   {
     name: 'get_habits',
     description: 'Read habits in Locus with current streaks and whether each is ticked today.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_ideas',
+    description: "Read the ideas inbox in Locus - loose thoughts not yet turned into goals or tasks.",
     inputSchema: { type: 'object', properties: {} },
   },
 ]
@@ -175,7 +217,143 @@ const TOOLS = [
       required: ['title'],
     },
   },
+  {
+    name: 'delete_task',
+    description: 'Permanently delete a task from Locus. Prefer complete_task if the task was actually finished - this is for things that should never have been there. Matched by id (exact) or name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The task id from get_tasks. Use this when several tasks have similar names.' },
+        name: { type: 'string', description: 'Task name, if you do not have the id.' },
+      },
+    },
+  },
+  {
+    name: 'delete_habit',
+    description: 'Permanently delete a habit/routine from Locus, along with its streak. Matched by id (exact) or name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The habit id from get_habits.' },
+        name: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'delete_goal',
+    description: 'Permanently delete a goal from Locus. Tasks pointing at it are unlinked, not deleted. Matched by id (exact) or name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The goal id from get_goals.' },
+        name: { type: 'string' },
+      },
+    },
+  },
+  {
+    name: 'delete_idea',
+    description: "Delete an idea from Locus's ideas inbox. Matched by id (exact) or the idea's text.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The idea id from get_ideas.' },
+        text: { type: 'string', description: 'The idea text, or enough of it to identify it.' },
+      },
+    },
+  },
+  {
+    name: 'remove_block',
+    description: "Remove a block from a day's plan in Locus. Only today's plan is supported right now.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: "The block's title, as get_today shows it." },
+        id: { type: 'string', description: 'The block id from get_today.' },
+        date: { type: 'string', description: 'YYYY-MM-DD. Defaults to today; other dates are not supported yet.' },
+      },
+    },
+  },
+  {
+    name: 'update_task',
+    description: 'Change an existing task in Locus - rename it, move its due date, or change its importance. Only the fields you pass are changed. Matched by id (exact) or name.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The task id from get_tasks.' },
+        name: { type: 'string', description: 'Current task name, if you do not have the id.' },
+        new_name: { type: 'string', description: 'Rename the task to this.' },
+        due: { type: 'string', description: 'New due date, e.g. "2026-10-02" or "Friday". Pass "" to clear it.' },
+        importance: { type: 'integer', enum: [1, 2, 3], description: '1=low, 2=normal, 3=high.' },
+        goal: { type: 'string', description: 'Name of a Locus goal to attach it to. Pass "" to unlink.' },
+      },
+    },
+  },
 ]
+
+// Tools that must look at the current snapshot before they can queue anything.
+const RESOLVED_TOOLS = new Set(['delete_task', 'delete_habit', 'delete_goal', 'delete_idea', 'remove_block', 'update_task'])
+
+// Builds the action for a tool that names an existing item. Returns
+// { error } instead of an action when nothing (or too much) matched.
+function toResolvedAction(name, args, snap) {
+  if (!snap) {
+    return { error: "Locus hasn't mirrored a snapshot yet, so there's nothing to match against. Open the app once, then try again." }
+  }
+  switch (name) {
+    case 'delete_task': {
+      const r = resolveOne(snap.tasks, args, 'name', 'task')
+      return r.error ? r : { action: { type: 'delete_task', id: r.id }, label: `task "${r.name}"` }
+    }
+    case 'delete_habit': {
+      const r = resolveOne(snap.habits, args, 'name', 'habit')
+      return r.error ? r : { action: { type: 'delete_habit', id: r.id }, label: `habit "${r.name}"` }
+    }
+    case 'delete_goal': {
+      const r = resolveOne(snap.goals, args, 'name', 'goal')
+      return r.error ? r : { action: { type: 'delete_goal', id: r.id }, label: `goal "${r.name}"` }
+    }
+    case 'delete_idea': {
+      const r = resolveOne(snap.ideas, args, 't', 'idea')
+      return r.error ? r : { action: { type: 'delete_idea', id: r.id }, label: `idea "${r.name}"` }
+    }
+    case 'remove_block': {
+      if (args.date && !isToday(args.date)) {
+        return { error: `remove_block can only touch today's plan right now - ${args.date} isn't today. Nothing was changed.` }
+      }
+      const r = resolveOne(snap.todayPlan, args, 'title', 'block')
+      // applyActions' remove_block matches on title, not id, so send the exact
+      // title back rather than the id the caller may have given.
+      return r.error ? r : { action: { type: 'remove_block', title: r.name }, label: `block "${r.name}" from today` }
+    }
+    case 'update_task': {
+      const r = resolveOne(snap.tasks, args, 'name', 'task')
+      if (r.error) return r
+      const updates = {}
+      if (args.new_name !== undefined) updates.name = args.new_name
+      if (args.due !== undefined) updates.due = args.due
+      if (args.goal !== undefined) updates.goal = args.goal
+      if (args.importance !== undefined) updates.imp = args.importance
+      if (!Object.keys(updates).length) {
+        return { error: `Nothing to change on "${r.name}" - pass at least one of new_name, due, importance or goal.` }
+      }
+      const what = Object.keys(updates).join(', ')
+      return { action: { type: 'edit_task', id: r.id, updates }, label: `task "${r.name}" (${what})` }
+    }
+    default:
+      return { error: `Unknown tool: ${name}` }
+  }
+}
+
+// Serverless runs in UTC and the user may not, so a date is "today" if it is
+// today anywhere in the range of plausible offsets. Better to accept a legal
+// date than to reject the user's actual today on a timezone technicality.
+function isToday(date) {
+  const now = Date.now()
+  for (const shift of [-1, 0, 1]) {
+    if (new Date(now + shift * 86400000).toISOString().slice(0, 10) === date) return true
+  }
+  return false
+}
 
 function toAction(name, args) {
   switch (name) {
@@ -207,6 +385,12 @@ function describeAction(a) {
     case 'tick_habit': return `habit "${a.name}" ${a.value ? 'done' : 'undone'}`
     case 'add_idea': return `idea "${a.text}"`
     case 'add_block': return `today's block "${a.title}"`
+    case 'delete_task': return 'that task for deletion'
+    case 'delete_habit': return 'that habit for deletion'
+    case 'delete_goal': return 'that goal for deletion'
+    case 'delete_idea': return 'that idea for deletion'
+    case 'remove_block': return `removal of "${a.title}" from today`
+    case 'edit_task': return 'that task edit'
     default: return a.type
   }
 }
@@ -256,7 +440,7 @@ async function handleRead(toolName, args) {
     if (!plan.length) return `${head}\nNo plan laid out for today yet.`
     const lines = plan.map((b) => {
       const state = b.done ? 'done' : b.status === 'skipped' ? 'skipped' : 'pending'
-      return `- [${state}] ${b.time || 'Anytime'}: ${b.title}${b.duration ? ` (${b.duration})` : ''}${b.desc ? ` - ${b.desc}` : ''}`
+      return `- [${state}] ${b.time || 'Anytime'}: ${b.title}${b.duration ? ` (${b.duration})` : ''}${b.desc ? ` - ${b.desc}` : ''} (id: ${b.id})`
     })
     return `${head}\nToday's plan (${plan.length} blocks):\n${lines.join('\n')}`
   }
@@ -266,7 +450,8 @@ async function handleRead(toolName, args) {
     const list = args.include_done ? all : all.filter((t) => !t.done)
     if (!list.length) return `${head}\nNo open tasks.`
     const lines = list.map(
-      (t) => `- ${t.name}${t.due ? ` (due ${t.due})` : ''}${t.goal ? ` [goal: ${t.goal}]` : ''}${t.imp === 3 ? ' [high]' : ''}${t.done ? ' [done]' : ''}`
+      (t) =>
+        `- ${t.name}${t.due ? ` (due ${t.due})` : ''}${t.goal ? ` [goal: ${t.goal}]` : ''}${t.imp === 3 ? ' [high]' : ''}${t.done ? ' [done]' : ''} (id: ${t.id})`
     )
     return `${head}\n${list.length} task(s):\n${lines.join('\n')}`
   }
@@ -280,7 +465,8 @@ async function handleRead(toolName, args) {
         const inGroup = goals.filter((g) => (g.p || 'maint') === p)
         if (!inGroup.length) return null
         const lines = inGroup.map(
-          (g) => `- ${g.name}${g.area ? ` (${g.area})` : ''}${g.deadline ? ` - deadline ${g.deadline}` : ''}${g.desc ? `: ${g.desc}` : ''}`
+          (g) =>
+            `- ${g.name}${g.area ? ` (${g.area})` : ''}${g.deadline ? ` - deadline ${g.deadline}` : ''}${g.desc ? `: ${g.desc}` : ''} (id: ${g.id})`
         )
         return `${label[p]}:\n${lines.join('\n')}`
       })
@@ -297,10 +483,17 @@ async function handleRead(toolName, args) {
         const dueToday = !days.length || days.includes(new Date().getDay())
         const when = days.length ? days.map((d) => DAY_SHORT[d]).join('/') : 'every day'
         const state = h.tickedToday ? 'done today' : dueToday ? 'not yet today' : 'not scheduled today'
-        return `- ${h.name} (${when}) - ${state}, streak ${h.streak || 0}${h.note ? ` - ${h.note}` : ''}`
+        return `- ${h.name} (${when}) - ${state}, streak ${h.streak || 0}${h.note ? ` - ${h.note}` : ''} (id: ${h.id})`
       }
     )
     return `${head}\n${habits.length} habit(s):\n${lines.join('\n')}`
+  }
+
+  if (toolName === 'get_ideas') {
+    const ideas = snap.ideas || []
+    if (!ideas.length) return `${head}\nNo ideas in the inbox.`
+    const lines = ideas.map((i) => `- ${i.t} (id: ${i.id})`)
+    return `${head}\n${ideas.length} idea(s):\n${lines.join('\n')}`
   }
 
   return 'Unknown read tool.'
@@ -350,6 +543,28 @@ export default async (req) => {
       if (READ_TOOLS.some((t) => t.name === toolName)) {
         const text = await handleRead(toolName, args)
         return respond({ content: [{ type: 'text', text }], isError: false })
+      }
+
+      // Delete/edit tools have to see what's actually in Locus before they can
+      // queue anything, so that "delete the CS218 one" either resolves to
+      // exactly one item or comes back as an error the caller can act on.
+      if (RESOLVED_TOOLS.has(toolName)) {
+        const snap = await stateStore().get('current', { type: 'json' })
+        const r = toResolvedAction(toolName, args, snap)
+        if (r.error) {
+          return respond({ content: [{ type: 'text', text: r.error }], isError: true })
+        }
+        const dkey = crypto.randomUUID()
+        await inboxStore().setJSON(dkey, { ...r.action, ts: Date.now() })
+        return respond({
+          content: [
+            {
+              type: 'text',
+              text: `Queued for Locus: ${r.label}. It'll apply next time the app is open, and sync from there.`,
+            },
+          ],
+          isError: false,
+        })
       }
 
       const action = toAction(toolName, args)
