@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase, pullAll, pushItems, pushPlanDay, pushDoc, isEmptyState } from "./db";
 import { IS_DEMO, DEMO_STATE } from "./demo";
+import { DAY_NAMES, DAY_SHORT, parseDays, effectiveDays, runsOn } from "./days";
 import "./App.css";
 
 const KEYS = {
@@ -52,9 +53,6 @@ function daysBetween(aKey, bKey) {
   return Math.round((b - a) / 86400000);
 }
 
-const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-const DAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
 /** "13:05" -> "1:05 PM". Anything unparseable comes back untouched. */
 function fmt12(hhmm) {
   const m = /^(\d{1,2}):(\d{2})$/.exec((hhmm || "").trim());
@@ -89,22 +87,6 @@ function durationLabel(start, end) {
   const b = minutesOf(fmt12(end));
   if (a === null || b === null || b <= a) return "";
   return b - a + " min";
-}
-
-/** Accepts [1,3], ["Mon","Wed"], "Mon, Wed", "MWF" - the model won't be consistent. */
-function parseDays(v) {
-  if (Array.isArray(v) && v.every((d) => typeof d === "number")) return v.filter((d) => d >= 0 && d <= 6);
-  const text = (Array.isArray(v) ? v.join(",") : String(v || "")).toLowerCase();
-  const out = [];
-  DAY_SHORT.forEach((short, i) => {
-    if (text.includes(short.toLowerCase()) || text.includes(DAY_NAMES[i].toLowerCase())) out.push(i);
-  });
-  if (out.length) return [...new Set(out)];
-  if (/^[mtwrfsu]+$/.test(text.replace(/[^a-z]/g, ""))) {
-    const map = { m: 1, t: 2, w: 3, r: 4, f: 5, s: 6, u: 0 };
-    return [...new Set(text.replace(/[^a-z]/g, "").split("").map((c) => map[c]).filter((d) => d !== undefined))];
-  }
-  return [];
 }
 
 function uid() {
@@ -247,7 +229,7 @@ function buildContext({ goals, tasks, habits, ideas, commitments, skipPatterns, 
         .map(
           (h) =>
             `- [id:${h.id}] ${h.name} - ${
-              (h.days || []).length ? h.days.map((d) => DAY_SHORT[d]).join("/") : "every day"
+              effectiveDays(h).length ? effectiveDays(h).map((d) => DAY_SHORT[d]).join("/") : "every day"
             }${h.start ? " at " + fmt12(h.start) : " (no set time)"}${h.note ? " - " + h.note : ""}, streak: ${
               h.streak || 0
             }`
@@ -939,7 +921,7 @@ export default function App() {
               name: a.name,
               freq: a.freq || "daily",
               note: a.note || "",
-              days: parseDays(a.days),
+              days: parseDays(a.days).length ? parseDays(a.days) : parseDays(a.freq),
               start: a.start || "",
               end: a.end || "",
               streak: 0,
@@ -1513,7 +1495,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
         ...habits
           .filter(
             (h) =>
-              (!(h.days || []).length || h.days.includes(dow)) &&
+              runsOn(h, dow) &&
               !present.has(h.id) &&
               !skip.includes(h.id) &&
               !titled.has(norm(h.name)) // don't duplicate one the planner already laid out
@@ -2200,7 +2182,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     >
                       <div style={{ fontSize: 13.5, fontWeight: 600 }}>{h.name}</div>
                       <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
-                        {(h.days || []).length ? h.days.map((d) => DAY_SHORT[d]).join(" ") : "every day"}
+                        {effectiveDays(h).length ? effectiveDays(h).map((d) => DAY_SHORT[d]).join(" ") : "every day"}
                         {h.start ? " \u00b7 " + fmt12(h.start) : ""}
                         {h.note ? " \u00b7 " + h.note : ""}
                       </div>

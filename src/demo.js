@@ -82,6 +82,9 @@ const habits = [
   { id: "d-h2", name: "Read 20 pages", freq: "daily", note: "", days: [], start: "", end: "", streak: 24, tickedToday: true, lastTicked: iso(0), week: [1, 1, 1, 1, 1, 1, 1] },
   { id: "d-h3", name: "Mental math drills", freq: "daily", note: "10 min soroban", days: [], start: "", end: "", streak: 6, tickedToday: false, lastTicked: iso(-1), week: [1, 1, 1, 0, 1, 1, 0] },
   { id: "d-h4", name: "Anki review", freq: "weekdays", note: "accounting deck", days: [1, 2, 3, 4, 5], start: "", end: "", streak: 3, tickedToday: false, lastTicked: iso(-1), week: [0, 1, 1, 1, 0, 0, 1] },
+  // Added through the connector, so the day lives in freq rather than days -
+  // the shape that used to leak onto every weekday.
+  { id: "d-h5", name: "Grocery run", freq: "Sunday", note: "", days: [], start: "", end: "", streak: 2, tickedToday: false, lastTicked: iso(-8), week: [0, 0, 0, 0, 0, 0, 0] },
 ];
 
 const ideas = [

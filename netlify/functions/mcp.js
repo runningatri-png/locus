@@ -15,6 +15,7 @@
 // Written against Netlify's v2 function API (standard Request/Response).
 // v1 handlers on this site don't get Netlify Blobs credentials injected.
 import { getStore } from '@netlify/blobs'
+import { effectiveDays, DAY_SHORT } from '../../src/days.js'
 import crypto from 'node:crypto'
 
 export const config = { path: '/mcp' }
@@ -128,6 +129,11 @@ const TOOLS = [
       properties: {
         name: { type: 'string' },
         freq: { type: 'string', description: 'e.g. "daily", "3x/week". Default "daily".' },
+        days: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Weekdays it runs on, e.g. ["Sunday"] or ["Mon","Wed","Fri"]. Omit for something with no fixed days.',
+        },
         note: { type: 'string' },
       },
       required: ['name'],
@@ -180,7 +186,7 @@ function toAction(name, args) {
     case 'add_goal':
       return { type: 'add_goal', name: args.name, area: args.area || 'Other', desc: args.desc || '', deadline: args.deadline || '', priority: args.priority || 'maint' }
     case 'add_habit':
-      return { type: 'add_habit', name: args.name, freq: args.freq || 'daily', note: args.note || '' }
+      return { type: 'add_habit', name: args.name, freq: args.freq || 'daily', days: args.days || '', note: args.note || '' }
     case 'tick_habit':
       return { type: 'tick_habit', name: args.name, value: args.value === undefined ? true : args.value }
     case 'add_idea':
@@ -286,7 +292,13 @@ async function handleRead(toolName, args) {
     const habits = snap.habits || []
     if (!habits.length) return `${head}\nNo habits set.`
     const lines = habits.map(
-      (h) => `- ${h.name}${h.freq ? ` (${h.freq})` : ''} - ${h.tickedToday ? 'done today' : 'not yet today'}, streak ${h.streak || 0}${h.note ? ` - ${h.note}` : ''}`
+      (h) => {
+        const days = effectiveDays(h)
+        const dueToday = !days.length || days.includes(new Date().getDay())
+        const when = days.length ? days.map((d) => DAY_SHORT[d]).join('/') : 'every day'
+        const state = h.tickedToday ? 'done today' : dueToday ? 'not yet today' : 'not scheduled today'
+        return `- ${h.name} (${when}) - ${state}, streak ${h.streak || 0}${h.note ? ` - ${h.note}` : ''}`
+      }
     )
     return `${head}\n${habits.length} habit(s):\n${lines.join('\n')}`
   }
@@ -342,7 +354,22 @@ export default async (req) => {
 
       const action = toAction(toolName, args)
       if (!action) return respondErr(-32602, `Unknown tool: ${toolName}`)
-      if (!action.name && !action.text) return respondErr(-32602, 'Missing required field')
+      // Each action type identifies itself by a different field - add_block
+      // uses `title`, ideas use `text`, the rest use `name`. The old check knew
+      // only about name/text, so add_today_block always failed with -32602.
+      const REQUIRED_FIELD = {
+        add_task: 'name',
+        complete_task: 'name',
+        add_goal: 'name',
+        add_habit: 'name',
+        tick_habit: 'name',
+        add_idea: 'text',
+        add_block: 'title',
+      }
+      const required = REQUIRED_FIELD[action.type]
+      if (required && !action[required]) {
+        return respondErr(-32602, `Missing required field: ${required}`)
+      }
 
       const key = crypto.randomUUID()
       await inboxStore().setJSON(key, { ...action, ts: Date.now() })
