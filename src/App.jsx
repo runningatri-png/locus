@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { supabase, pullAll, pushItems, pushPlanDay, pushDoc, isEmptyState } from "./db";
 import { IS_DEMO, DEMO_STATE } from "./demo";
 import { DAY_NAMES, DAY_SHORT, parseDays, effectiveDays, runsOn } from "./days";
+import { isoKey, addDays, daysBetween, norm, dueKey, countdown } from "./dayview";
 import "./App.css";
 
 const KEYS = {
@@ -39,18 +40,8 @@ function save(key, val) {
   } catch {}
 }
 
-function isoKey(d) {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
 function prettyDate(d) {
   return d.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
-}
-
-function daysBetween(aKey, bKey) {
-  const a = new Date(aKey + "T12:00:00");
-  const b = new Date(bKey + "T12:00:00");
-  return Math.round((b - a) / 86400000);
 }
 
 /** "13:05" -> "1:05 PM". Anything unparseable comes back untouched. */
@@ -93,8 +84,20 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-function norm(str) {
-  return (str || "").trim().toLowerCase();
+/** Noon, so a daylight-saving shift can never move a date onto its neighbour. */
+function dateAt(key) {
+  return new Date(key + "T12:00:00");
+}
+
+/** Same title twice on one day means one of them is a duplicate, not a plan. */
+function dedupeBlocks(blocks) {
+  const seen = new Set();
+  return blocks.filter((b) => {
+    const k = norm(b.title);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 function extractJSONArray(text) {
@@ -598,12 +601,35 @@ export default function App() {
       );
     }
 
+    // Blocks put on this date ahead of time - from the calendar or the
+    // connector - live in planArchive. Read from storage rather than state:
+    // this effect runs on mount, before the archive effect has had a chance to
+    // overwrite today's entry with the live plan.
+    const preAdded = (load(KEYS.planArchive, {}) || {})[todayK] || [];
+
     const targetDate = load(KEYS.tomorrowDate, null);
     const stored = load(KEYS.tomorrowPlan, []);
-    if (targetDate && stored.length && daysBetween(targetDate, todayK) >= 0) {
-      setTodayPlan(stored.map((b) => ({ ...b, id: uid(), done: false, status: "pending", startTime: null })));
-      setTomorrowPlan([]);
-      localStorage.removeItem(KEYS.tomorrowDate);
+    const rollingOver = targetDate && stored.length && daysBetween(targetDate, todayK) >= 0;
+
+    if (rollingOver || preAdded.length) {
+      const fresh = rollingOver
+        ? stored.map((b) => ({ ...b, id: uid(), done: false, status: "pending", startTime: null }))
+        : [];
+
+      // MERGE, never replace. The tomorrow plan used to overwrite today
+      // outright, which silently wiped anything scheduled for this date in
+      // advance - every single morning.
+      setTodayPlan((prev) => {
+        const base = rollingOver ? fresh : prev;
+        const seen = new Set(base.map((b) => norm(b.title)));
+        const extra = preAdded.filter((b) => !seen.has(norm(b.title)));
+        return extra.length || rollingOver ? sortPlan([...base, ...extra]) : prev;
+      });
+
+      if (rollingOver) {
+        setTomorrowPlan([]);
+        localStorage.removeItem(KEYS.tomorrowDate);
+      }
     }
   }, [todayK]);
 
@@ -664,11 +690,16 @@ export default function App() {
       fetch("/.netlify/functions/state", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goals, tasks, habits, ideas, todayPlan, tomorrowPlan, context }),
+        body: JSON.stringify({
+          goals, tasks, habits, ideas, todayPlan, tomorrowPlan, context,
+          // get_plan(date) derives future days from these, exactly the way the
+          // calendar does. Without them the connector could only see today.
+          commitments, planArchive, fixedDismissed, todayKey: todayK,
+        }),
       }).catch(() => {});
     }, 2500);
     return () => clearTimeout(mirrorTimerRef.current);
-  }, [goals, tasks, habits, ideas, todayPlan, tomorrowPlan, context]);
+  }, [goals, tasks, habits, ideas, todayPlan, tomorrowPlan, context, commitments, planArchive, fixedDismissed, todayK]);
 
   // Moving Locus between devices. localStorage never leaves the browser it was
   // written in, so without this a new phone or laptop starts empty and the old
@@ -1018,30 +1049,52 @@ export default function App() {
         }
         case "add_block": {
           if (!a.title) break;
-          setTodayPlan((prev) => {
-            if (prev.some((b) => norm(b.title) === norm(a.title) && !b.done && b.status !== "skipped")) return prev;
-            return [
-              ...prev,
-              {
-                time: a.time || "Anytime",
-                title: a.title,
-                desc: a.desc || "",
-                imp: Math.min(3, Math.max(1, Number(a.imp) || 2)),
-                duration: a.duration || "",
-                id: uid(),
-                done: false,
-                status: "pending",
-                startTime: null,
-              },
-            ];
-          });
-          toast("Added to today: " + a.title);
+          // A block can be aimed at any date now. Today still goes to the live
+          // plan; every other date is stored in planArchive, which is what the
+          // calendar reads and what the morning rollover merges from.
+          const key = /^\d{4}-\d{2}-\d{2}$/.test(a.date || "") ? a.date : todayK;
+          const block = {
+            time: a.time || "Anytime",
+            title: a.title,
+            desc: a.desc || "",
+            imp: Math.min(3, Math.max(1, Number(a.imp) || 2)),
+            duration: a.duration || "",
+            id: uid(),
+            done: false,
+            status: "pending",
+            startTime: null,
+          };
+
+          if (key === todayK) {
+            setTodayPlan((prev) =>
+              prev.some((b) => norm(b.title) === norm(a.title) && !b.done && b.status !== "skipped")
+                ? prev
+                : sortPlan([...prev, block])
+            );
+            toast("Added to today: " + a.title);
+          } else {
+            setPlanArchive((prev) => {
+              const day = prev[key] || [];
+              if (day.some((b) => norm(b.title) === norm(a.title))) return prev;
+              return { ...prev, [key]: sortPlan([...day, block]) };
+            });
+            toast(`Added to ${prettyDate(dateAt(key))}: ${a.title}`);
+          }
           break;
         }
         case "remove_block": {
           if (!a.title) break;
-          setTodayPlan((prev) => prev.filter((b) => b.done || !norm(b.title).includes(norm(a.title))));
-          toast("Removed from today");
+          const key = /^\d{4}-\d{2}-\d{2}$/.test(a.date || "") ? a.date : todayK;
+          if (key === todayK) {
+            setTodayPlan((prev) => prev.filter((b) => b.done || !norm(b.title).includes(norm(a.title))));
+            toast("Removed from today");
+          } else {
+            setPlanArchive((prev) => ({
+              ...prev,
+              [key]: (prev[key] || []).filter((b) => !norm(b.title).includes(norm(a.title))),
+            }));
+            toast("Removed from " + prettyDate(dateAt(key)));
+          }
           break;
         }
         case "edit_block": {
@@ -1438,14 +1491,6 @@ Rough one. Dropped the deep work block and moved the call to tonight.
   const firstDow = new Date(calY, calM, 1).getDay();
   const daysInMonth = new Date(calY, calM + 1, 0).getDate();
 
-  const selectedDateObj = new Date(calSelected + "T12:00:00");
-  const selectedPlan =
-    calSelected === todayK
-      ? todayPlan
-      : calSelected === tomorrowK && tomorrowPlan.length
-      ? tomorrowPlan
-      : planArchive[calSelected] || [];
-  const selectedHistory = history.find((h) => h.key === calSelected || h.date === prettyDate(selectedDateObj));
 
   // Fixed commitments place themselves on today and tomorrow. No approval step:
   // class happens whether or not the plan acknowledges it. Matching is by src, so
@@ -1467,6 +1512,55 @@ Rough one. Dropped the deep work block and moved the call to tonight.
 
   // A tracked routine is the same shape with a streak attached. No days set
   // means every day - a 5x-a-week habit should still appear daily to tick.
+  // Everything that belongs on a date, worked out on the fly rather than stored.
+  // Only genuinely one-off blocks are ever written down; routines, fixed
+  // commitments and task deadlines are recomputed every time from the same
+  // sources Today uses. That means changing a habit's days instantly corrects
+  // every future day, instead of leaving hundreds of pre-generated rows to fix.
+  const dayView = (k) => {
+    const dow = dateAt(k).getDay();
+    const rel = daysBetween(todayK, k);
+
+    // Today and tomorrow already have their routines merged into the stored plan
+    // by placeFixed(), and past days should show what actually happened rather
+    // than what was scheduled. Only genuinely future days get derived blocks.
+    const isFuture = rel > 1;
+    const stored =
+      k === todayK
+        ? todayPlan
+        : k === tomorrowK
+        ? dedupeBlocks([...tomorrowPlan, ...(planArchive[k] || [])])
+        : planArchive[k] || [];
+
+    const skip = fixedDismissed[k] || [];
+    const titled = new Set(stored.map((b) => norm(b.title)));
+
+    const fixed = !isFuture
+      ? []
+      : commitments
+          .filter((c) => (c.days || []).includes(dow) && !skip.includes(c.id))
+          .map((c) => ({ ...blockFor(c), id: `${k}:${c.id}`, derived: true }));
+
+    const routines = !isFuture
+      ? []
+      : habits
+          .filter((h) => runsOn(h, dow) && !skip.includes(h.id) && !titled.has(norm(h.name)))
+          .map((h) => ({ ...habitBlockFor(h), id: `${k}:${h.id}`, derived: true, done: false }));
+
+    const deadlines = tasks.filter((t) => !t.done && dueKey(t.due, todayK) === k);
+
+    return { rel, stored, deadlines, blocks: sortPlan([...stored, ...fixed, ...routines]) };
+  };
+
+  // How busy a date looks, for the dot under each calendar cell.
+  const dayLoad = (k) => {
+    const v = dayView(k);
+    return {
+      n: v.blocks.length + v.deadlines.length,
+      high: v.deadlines.some((t) => (t.imp || 2) === 3),
+    };
+  };
+
   const habitBlockFor = (h) => ({
     id: uid(),
     src: h.id,
@@ -1481,6 +1575,33 @@ Rough one. Dropped the deep work block and moved the call to tonight.
     status: "pending",
     startTime: null,
   });
+
+  const selectedDateObj = dateAt(calSelected);
+  const selectedView = dayView(calSelected);
+
+  // High-importance tasks falling in the week AFTER a given day. Shown as a
+  // countdown so the pressure is visible on the days you'd prepare on, not only
+  // once it's too late to do anything about it.
+  const upcomingFrom = (fromKey) =>
+    tasks
+      .filter((t) => {
+        if (t.done || (t.imp || 2) !== 3) return false;
+        const k = dueKey(t.due, todayK);
+        if (!k) return false;
+        const gap = daysBetween(fromKey, k);
+        return gap > 0 && gap <= 7;
+      })
+      .sort((a, b) => daysBetween(fromKey, dueKey(a.due, todayK)) - daysBetween(fromKey, dueKey(b.due, todayK)));
+  const selectedHistory = history.find((h) => h.key === calSelected || h.date === prettyDate(selectedDateObj));
+  // A load bar is only meaningful relative to something. Scaling each day
+  // against the busiest day in the month shown means the bars actually vary,
+  // instead of every day past a threshold looking identically full.
+  const monthLoads = {};
+  for (let d = 1; d <= daysInMonth; d++) {
+    const key = `${calY}-${String(calM + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    monthLoads[key] = dayLoad(key);
+  }
+  const busiest = Math.max(1, ...Object.values(monthLoads).map((v) => v.n));
 
   const placeFixed = (dayKey, setPlan) => {
     const dow = new Date(dayKey + "T12:00:00").getDay();
@@ -2653,7 +2774,8 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                 const k = `${calY}-${String(calM + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
                 const isToday = k === todayK;
                 const isSel = k === calSelected;
-                const has = dayHasData(k);
+                const { n: loadN, high } = monthLoads[k] || { n: 0, high: false };
+                const has = loadN > 0 || dayHasData(k);
                 return (
                   <div
                     key={k}
@@ -2684,9 +2806,27 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                     >
                       {day}
                     </div>
-                    {has && (
-                      <div style={{ width: 4, height: 4, borderRadius: "50%", background: isSel ? "var(--accent)" : "var(--muted-2)" }} />
-                    )}
+                    {/* Load bar: how full the day is at a glance. A red pip on top
+                        means a high-importance task falls due on it. */}
+                    <div style={{ display: "flex", alignItems: "center", gap: 3, height: 4 }}>
+                      {has && (
+                        <div
+                          style={{
+                            width: Math.max(4, Math.round((loadN / busiest) * 18)),
+                            height: 3,
+                            borderRadius: 2,
+                            background: isSel
+                              ? "var(--accent)"
+                              : loadN >= busiest * 0.75
+                              ? "var(--muted)"
+                              : "var(--muted-2)",
+                          }}
+                        />
+                      )}
+                      {high && (
+                        <div style={{ width: 4, height: 4, borderRadius: "50%", background: "var(--red)" }} />
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -2694,52 +2834,95 @@ Rough one. Dropped the deep work block and moved the call to tonight.
 
             <div style={{ ...sectionLabel, marginBottom: 10 }}>
               {selectedDateObj.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}
-              {calSelected === todayK ? " - today" : calSelected === tomorrowK ? " - tomorrow" : ""}
+              {calSelected === todayK
+                ? " - today"
+                : calSelected === tomorrowK
+                ? " - tomorrow"
+                : ` - ${countdown(todayK, calSelected)}`}
             </div>
 
-            {(() => {
-              const dow = selectedDateObj.getDay();
-              const fixed = commitments
-                .filter((c) => (c.days || []).includes(dow))
-                .sort((a, b) => (minutesOf(fmt12(a.start)) ?? 0) - (minutesOf(fmt12(b.start)) ?? 0));
-              if (!fixed.length) return null;
-              return (
-                <div style={{ ...card, padding: "12px 14px", marginBottom: 12 }}>
-                  <div style={{ ...sectionLabel, marginBottom: 8 }}>Every {DAY_NAMES[dow]}</div>
-                  {fixed.map((c) => (
-                    <div key={c.id} style={{ display: "flex", gap: 10, alignItems: "center", padding: "4px 0" }}>
-                      <div style={{ width: 118, flexShrink: 0, fontSize: 11.5, color: "var(--muted)" }}>
-                        {fmt12(c.start)}
-                        {c.end ? " - " + fmt12(c.end) : ""}
+            {/* Deadlines land first: a due date is the one thing on a day that
+                can't be moved by rearranging the rest of it. */}
+            {selectedView.deadlines.length > 0 && (
+              <div style={{ marginBottom: 12 }}>
+                {selectedView.deadlines.map((t) => {
+                  const hot = (t.imp || 2) === 3;
+                  return (
+                    <div
+                      key={t.id}
+                      style={{
+                        ...card,
+                        padding: "10px 13px",
+                        marginBottom: 6,
+                        borderLeft: `3px solid ${hot ? "var(--red)" : "var(--amber)"}`,
+                        background: hot ? "var(--red-soft, var(--surface-2))" : card.background,
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 10, ...mono, color: hot ? "var(--red)" : "var(--amber)" }}>
+                          {hot ? "DUE - HIGH" : "DUE"}
+                        </span>
+                        <ImpDots imp={t.imp} />
                       </div>
-                      <div style={{ flex: 1, minWidth: 0, fontSize: 13 }}>{c.label}</div>
-                      <span className="pill" style={{ background: "var(--chip)", color: "var(--muted)" }}>
-                        {c.kind}
-                      </span>
+                      <div style={{ fontSize: 13, fontWeight: hot ? 600 : 500, marginTop: 3 }}>{t.name}</div>
+                      {t.goal && (
+                        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>toward {t.goal}</div>
+                      )}
                     </div>
-                  ))}
-                </div>
-              );
-            })()}
-
-            {!selectedPlan.length && !selectedHistory && (
-              <div style={{ color: "var(--muted)", fontSize: 12, ...mono, padding: "12px 0" }}>
-                nothing recorded for this day
+                  );
+                })}
               </div>
             )}
 
-            {selectedPlan.map((b) => (
+            {/* What's coming after this day, so a big deadline is visible from the
+                days you'd actually have to prepare on - not just on the day itself. */}
+            {upcomingFrom(calSelected).map((t) => (
+              <div
+                key={"cd" + t.id}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  padding: "7px 11px",
+                  marginBottom: 6,
+                  borderRadius: 8,
+                  background: "var(--surface-2)",
+                  border: "1px solid var(--border)",
+                  fontSize: 12,
+                }}
+              >
+                <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--red)", flexShrink: 0 }} />
+                <span style={{ flex: 1, minWidth: 0 }}>{t.name}</span>
+                <span style={{ fontSize: 11, ...mono, color: "var(--muted)" }}>
+                  {countdown(calSelected, dueKey(t.due, todayK))}
+                </span>
+              </div>
+            ))}
+
+            {!selectedView.blocks.length && !selectedView.deadlines.length && !selectedHistory && (
+              <div style={{ color: "var(--muted)", fontSize: 12, ...mono, padding: "12px 0" }}>
+                {selectedView.rel > 1 ? "nothing scheduled for this day yet" : "nothing recorded for this day"}
+              </div>
+            )}
+
+            {selectedView.blocks.map((b) => (
               <div
                 key={b.id}
                 style={{
                   ...card,
                   padding: "11px 14px",
                   marginBottom: 7,
-                  opacity: b.done || b.status === "skipped" ? 0.45 : 1,
+                  opacity: b.done || b.status === "skipped" ? 0.45 : b.derived ? 0.78 : 1,
+                  borderStyle: b.derived ? "dashed" : "solid",
                 }}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
                   <div style={{ fontSize: 11, ...mono, color: "var(--accent)" }}>{b.time}</div>
+                  {b.derived && (
+                    <span style={{ fontSize: 10, ...mono, color: "var(--muted-2)" }}>
+                      {b.tracked ? "routine" : "recurring"}
+                    </span>
+                  )}
                   {b.duration && <div style={{ fontSize: 10, ...mono, color: "var(--muted)" }}>{b.duration}</div>}
                   <ImpDots imp={b.imp} />
                   {b.done && <span style={{ marginLeft: "auto", fontSize: 10, ...mono, color: "var(--green)" }}>done</span>}

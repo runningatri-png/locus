@@ -15,12 +15,15 @@
 // Written against Netlify's v2 function API (standard Request/Response).
 // v1 handlers on this site don't get Netlify Blobs credentials injected.
 import { getStore } from '@netlify/blobs'
-import { effectiveDays, DAY_SHORT } from '../../src/days.js'
+import { effectiveDays, DAY_SHORT, runsOn } from '../../src/days.js'
+import { dueKey, countdown, daysBetween, addDays } from '../../src/dayview.js'
 import crypto from 'node:crypto'
 
 export const config = { path: '/mcp' }
 
 const PROTOCOL_VERSION = '2025-06-18'
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 function inboxStore() {
   const opts = { name: 'locus-inbox', consistency: 'strong' }
@@ -72,7 +75,7 @@ function resolveOne(list, args, field, noun) {
   if (args.id) {
     const hit = items.find((i) => i.id === args.id)
     if (!hit) return { error: `No ${noun} in Locus has id "${args.id}". Call the matching get_ tool to see current ids.` }
-    return { id: hit.id, name: labelOf(hit, field) }
+    return { id: hit.id, name: labelOf(hit, field), derived: !!hit.derived }
   }
   const q = norm(args.name || args.text || args.title)
   if (!q) return { error: `Give either an id or a name to say which ${noun} you mean.` }
@@ -88,7 +91,7 @@ function resolveOne(list, args, field, noun) {
       error: `"${args.name || args.text || args.title}" matches ${hits.length} ${noun}s in Locus. Nothing was changed - call again with one of these ids:\n${opts}`,
     }
   }
-  return { id: hits[0].id, name: labelOf(hits[0], field) }
+  return { id: hits[0].id, name: labelOf(hits[0], field), derived: !!hits[0].derived }
 }
 
 const READ_TOOLS = [
@@ -116,6 +119,17 @@ const READ_TOOLS = [
     name: 'get_habits',
     description: 'Read habits in Locus with current streaks and whether each is ticked today.',
     inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'get_plan',
+    description:
+      "Read the plan for any date in Locus - today, tomorrow, or a day weeks out. Merges the routines and fixed commitments that fall on that weekday, any tasks due that day, and any one-off blocks already scheduled for it.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: 'YYYY-MM-DD. Defaults to today.' },
+      },
+    },
   },
   {
     name: 'get_ideas',
@@ -209,6 +223,23 @@ const TOOLS = [
       type: 'object',
       properties: {
         title: { type: 'string' },
+        time: { type: 'string', enum: ['Morning', 'Late morning', 'Midday', 'Afternoon', 'Evening', 'Night'], description: 'Default Anytime if omitted.' },
+        desc: { type: 'string' },
+        duration: { type: 'string', description: 'e.g. "~30 min"' },
+        imp: { type: 'integer', enum: [1, 2, 3] },
+      },
+      required: ['title'],
+    },
+  },
+  {
+    name: 'add_block',
+    description:
+      "Add a block to a specific day's plan in Locus. Use this for anything scheduled on a particular date - today or a future one. Do NOT use it for recurring routines or standing commitments; those place themselves on every matching day (see add_habit).",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        date: { type: 'string', description: 'YYYY-MM-DD. Defaults to today.' },
         time: { type: 'string', enum: ['Morning', 'Late morning', 'Midday', 'Afternoon', 'Evening', 'Night'], description: 'Default Anytime if omitted.' },
         desc: { type: 'string' },
         duration: { type: 'string', description: 'e.g. "~30 min"' },
@@ -317,13 +348,25 @@ function toResolvedAction(name, args, snap) {
       return r.error ? r : { action: { type: 'delete_idea', id: r.id }, label: `idea "${r.name}"` }
     }
     case 'remove_block': {
-      if (args.date && !isToday(args.date)) {
-        return { error: `remove_block can only touch today's plan right now - ${args.date} isn't today. Nothing was changed.` }
+      if (args.date && !ISO_DATE.test(args.date)) {
+        return { error: `"${args.date}" isn't a date I can use - give it as YYYY-MM-DD. Nothing was changed.` }
       }
-      const r = resolveOne(snap.todayPlan, args, 'title', 'block')
+      // A snapshot mirrored before this version has no todayKey. With no date
+      // asked for, today's plan is still exactly snap.todayPlan, so resolve
+      // against that rather than coming up empty.
+      const key = args.date || snap.todayKey || ''
+      const onDay = key ? planFor(snap, key).blocks : snap.todayPlan || []
+      const r = resolveOne(onDay, args, 'title', 'block')
       // applyActions' remove_block matches on title, not id, so send the exact
       // title back rather than the id the caller may have given.
-      return r.error ? r : { action: { type: 'remove_block', title: r.name }, label: `block "${r.name}" from today` }
+      if (r.error) return r
+      if (r.derived) {
+        return { error: `"${r.name}" is a recurring routine, not a one-off block - it appears on every matching day. Remove it from the routine itself instead. Nothing was changed.` }
+      }
+      return {
+        action: { type: 'remove_block', title: r.name, date: args.date || '' },
+        label: `block "${r.name}" from ${args.date || 'today'}`,
+      }
     }
     case 'update_task': {
       const r = resolveOne(snap.tasks, args, 'name', 'task')
@@ -344,17 +387,6 @@ function toResolvedAction(name, args, snap) {
   }
 }
 
-// Serverless runs in UTC and the user may not, so a date is "today" if it is
-// today anywhere in the range of plausible offsets. Better to accept a legal
-// date than to reject the user's actual today on a timezone technicality.
-function isToday(date) {
-  const now = Date.now()
-  for (const shift of [-1, 0, 1]) {
-    if (new Date(now + shift * 86400000).toISOString().slice(0, 10) === date) return true
-  }
-  return false
-}
-
 function toAction(name, args) {
   switch (name) {
     case 'add_task':
@@ -369,8 +401,17 @@ function toAction(name, args) {
       return { type: 'tick_habit', name: args.name, value: args.value === undefined ? true : args.value }
     case 'add_idea':
       return { type: 'add_idea', text: args.text }
-    case 'add_today_block':
-      return { type: 'add_block', time: args.time || 'Anytime', title: args.title, desc: args.desc || '', duration: args.duration || '', imp: args.imp || 2 }
+    case 'add_block':
+    case 'add_today_block': // kept as an alias so older clients keep working
+      return {
+        type: 'add_block',
+        date: name === 'add_block' && ISO_DATE.test(args.date || '') ? args.date : '',
+        time: args.time || 'Anytime',
+        title: args.title,
+        desc: args.desc || '',
+        duration: args.duration || '',
+        imp: args.imp || 2,
+      }
     default:
       return null
   }
@@ -384,7 +425,7 @@ function describeAction(a) {
     case 'add_habit': return `habit "${a.name}"`
     case 'tick_habit': return `habit "${a.name}" ${a.value ? 'done' : 'undone'}`
     case 'add_idea': return `idea "${a.text}"`
-    case 'add_block': return `today's block "${a.title}"`
+    case 'add_block': return a.date ? `block "${a.title}" on ${a.date}` : `today's block "${a.title}"`
     case 'delete_task': return 'that task for deletion'
     case 'delete_habit': return 'that habit for deletion'
     case 'delete_goal': return 'that goal for deletion'
@@ -425,6 +466,65 @@ const json = (payload, status = 200) =>
     status,
     headers: { ...CORS, 'Content-Type': 'application/json' },
   })
+
+// The same merge the calendar does, from the mirrored snapshot. Routines and
+// commitments are derived per weekday rather than stored, so a future day
+// reflects the current schedule instead of a stale copy of it.
+function planFor(snap, key) {
+  const todayK = snap.todayKey || ''
+  const rel = todayK ? daysBetween(todayK, key) : 0
+  const dow = new Date(key + 'T12:00:00').getDay()
+  const archive = snap.planArchive || {}
+  const tomorrowK = todayK ? addDays(todayK, 1) : ''
+
+  const stored =
+    key === todayK
+      ? snap.todayPlan || []
+      : key === tomorrowK
+      ? [...(snap.tomorrowPlan || []), ...(archive[key] || [])]
+      : archive[key] || []
+
+  // Today and tomorrow already have their routines merged into the stored plan
+  // by the app, so deriving again would double them up.
+  const isFuture = rel > 1
+  const skip = (snap.fixedDismissed || {})[key] || []
+  const titled = new Set(stored.map((b) => norm(b.title)))
+
+  const fixed = !isFuture
+    ? []
+    : (snap.commitments || [])
+        .filter((c) => (c.days || []).includes(dow) && !skip.includes(c.id))
+        .map((c) => ({ id: `${key}:${c.id}`, title: c.label, time: c.start || 'Anytime', derived: true, kind: c.kind }))
+
+  const routines = !isFuture
+    ? []
+    : (snap.habits || [])
+        .filter((h) => runsOn(h, dow) && !skip.includes(h.id) && !titled.has(norm(h.name)))
+        .map((h) => ({ id: `${key}:${h.id}`, title: h.name, time: h.start || 'Anytime', derived: true, routine: true }))
+
+  const deadlines = (snap.tasks || []).filter((t) => !t.done && dueKey(t.due, todayK) === key)
+
+  return { rel, blocks: sortByClock([...stored, ...fixed, ...routines]), deadlines }
+}
+
+// Clock-timed blocks in order, phase-labelled ones ("Midday") after, in the
+// order they were already in. Same rule the app's sortPlan() uses, applied to
+// the raw "HH:MM" the snapshot carries.
+function sortByClock(blocks) {
+  const mins = (t) => {
+    const m = /^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i.exec(String(t || '').trim())
+    if (!m) return null
+    let h = Number(m[1])
+    const ap = (m[3] || '').toUpperCase()
+    if (ap === 'PM' && h !== 12) h += 12
+    if (ap === 'AM' && h === 12) h = 0
+    return h * 60 + Number(m[2])
+  }
+  return blocks
+    .map((b, i) => ({ b, i, m: mins(b.time) }))
+    .sort((x, y) => (x.m === null) - (y.m === null) || (x.m ?? 0) - (y.m ?? 0) || x.i - y.i)
+    .map((x) => x.b)
+}
 
 async function handleRead(toolName, args) {
   const snap = await stateStore().get('current', { type: 'json' })
@@ -487,6 +587,37 @@ async function handleRead(toolName, args) {
       }
     )
     return `${head}\n${habits.length} habit(s):\n${lines.join('\n')}`
+  }
+
+  if (toolName === 'get_plan') {
+    const todayK = snap.todayKey || ''
+    if (!todayK) {
+      return `${head}\nThis snapshot was mirrored by an older version of Locus that doesn't record what day it is, so I can't work out any date's plan from it. Open Locus once on an up-to-date device and try again.`
+    }
+    const key = ISO_DATE.test(args.date || '') ? args.date : todayK
+    const when = key === todayK ? 'today' : countdown(todayK, key)
+    const { blocks, deadlines } = planFor(snap, key)
+    const out = [`${head}\nPlan for ${key} (${when}):`]
+
+    if (deadlines.length) {
+      out.push(
+        'Due this day:\n' +
+          deadlines.map((t) => `- ${t.name}${(t.imp || 2) === 3 ? ' [HIGH IMPORTANCE]' : ''}`).join('\n')
+      )
+    }
+    if (blocks.length) {
+      out.push(
+        blocks
+          .map((b) => {
+            const tag = b.derived ? (b.routine ? ' [recurring routine]' : ' [standing commitment]') : ''
+            const state = b.done ? ' - done' : b.status === 'skipped' ? ' - skipped' : ''
+            return `- ${b.time || 'Anytime'}: ${b.title}${tag}${state}`
+          })
+          .join('\n')
+      )
+    }
+    if (!blocks.length && !deadlines.length) out.push('Nothing scheduled.')
+    return out.join('\n\n')
   }
 
   if (toolName === 'get_ideas') {
