@@ -25,6 +25,8 @@ const PROTOCOL_VERSION = '2025-06-18'
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
+const BUILD = 'u2-calendar'
+
 function inboxStore() {
   const opts = { name: 'locus-inbox', consistency: 'strong' }
   const siteID = process.env.SITE_ID || process.env.NETLIFY_SITE_ID
@@ -533,7 +535,10 @@ async function handleRead(toolName, args) {
   }
 
   const age = freshness(snap.updatedAt)
-  const head = `Locus as of ${age}:`
+  // Version marker. The tool LIST is cached by clients, so a newly added tool
+  // can't tell us whether a deploy landed - but an existing tool's OUTPUT isn't
+  // cached, so this can. Reads the count straight off the arrays it serves.
+  const head = `Locus as of ${age}: [connector build ${BUILD}, ${TOOLS.length + READ_TOOLS.length} tools]`
 
   if (toolName === 'get_today') {
     const plan = snap.todayPlan || []
