@@ -1606,24 +1606,64 @@ Rough one. Dropped the deep work block and moved the call to tonight.
   const placeFixed = (dayKey, setPlan) => {
     const dow = new Date(dayKey + "T12:00:00").getDay();
     const skip = fixedDismissed[dayKey] || [];
+
     setPlan((prev) => {
-      const present = new Set(prev.filter((b) => b.src).map((b) => b.src));
-      const titled = new Set(prev.map((b) => norm(b.title)));
-      const add = [
-        ...commitments
-          .filter((c) => (c.days || []).includes(dow) && !present.has(c.id) && !skip.includes(c.id))
-          .map(blockFor),
-        ...habits
-          .filter(
-            (h) =>
-              runsOn(h, dow) &&
-              !present.has(h.id) &&
-              !skip.includes(h.id) &&
-              !titled.has(norm(h.name)) // don't duplicate one the planner already laid out
-          )
-          .map(habitBlockFor),
-      ];
-      return add.length ? sortPlan([...prev, ...add]) : prev;
+      // Everything that genuinely belongs on this weekday, by source id.
+      const belongs = new Map();
+      commitments
+        .filter((c) => (c.days || []).includes(dow) && !skip.includes(c.id))
+        .forEach((c) => belongs.set(c.id, { kind: "commitment", item: c }));
+      habits
+        .filter((h) => runsOn(h, dow) && !skip.includes(h.id))
+        .forEach((h) => belongs.set(h.id, { kind: "habit", item: h }));
+
+      // --- Remove what no longer belongs ------------------------------------
+      // This function used to only ever ADD. That meant a block placed by an
+      // earlier, buggier schedule - a Sunday chore sitting on a Monday - stayed
+      // on the day forever, because nothing was ever responsible for taking it
+      // off again. Fixing the filter stopped new mistakes but couldn't undo old
+      // ones. Auto-placed blocks are now derived state: if the schedule says it
+      // doesn't belong today, it goes.
+      //
+      // Two things are deliberately never touched: blocks with no `src` (you
+      // put those there by hand) and anything already done or skipped (that's a
+      // record of what actually happened, not a plan).
+      const kept = prev.filter((b) => {
+        if (!b.src) return true;
+        if (b.done || b.status === "skipped") return true;
+        return belongs.has(b.src);
+      });
+
+      // --- Drop duplicates by title ----------------------------------------
+      // Commitments were only ever checked by id, so one that came back with a
+      // new id - deleted and recreated, or re-synced from another device - laid
+      // a second copy of itself down next to the first.
+      const seenTitle = new Set();
+      const deduped = kept.filter((b) => {
+        const t = norm(b.title);
+        if (!b.src) { seenTitle.add(t); return true; }   // hand-made wins
+        if (seenTitle.has(t)) return false;
+        seenTitle.add(t);
+        return true;
+      });
+
+      // --- Add what's missing ----------------------------------------------
+      const presentSrc = new Set(deduped.filter((b) => b.src).map((b) => b.src));
+      const add = [];
+      for (const [id, { kind, item }] of belongs) {
+        if (presentSrc.has(id)) continue;
+        const title = norm(kind === "commitment" ? item.label : item.name);
+        if (seenTitle.has(title)) continue; // the planner already laid this out
+        seenTitle.add(title);
+        add.push(kind === "commitment" ? blockFor(item) : habitBlockFor(item));
+      }
+
+      const next = add.length ? [...deduped, ...add] : deduped;
+      // Same length and same ids means nothing actually changed - returning
+      // `prev` keeps React from re-rendering (and re-syncing) on every pass.
+      const unchanged =
+        next.length === prev.length && next.every((b, i) => b.id === prev[i].id);
+      return unchanged ? prev : sortPlan(next);
     });
   };
 
