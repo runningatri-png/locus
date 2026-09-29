@@ -113,7 +113,8 @@ deadlines. `buildContext()` now opens with today's date.
 ## Testing
 
 - Pure logic (`days.js`, `dayview.js`, the connector's resolvers) gets plain
-  Node test scripts. They're fast and they've caught real regressions.
+  Node test scripts in `tests/`, run with `node tests/<name>.test.mjs`. They're
+  fast and they've caught real regressions.
 - UI changes get a real browser check - build, serve, drive it, assert, and
   screenshot. Check mobile width (~390px) as well as desktop; this app is used
   on a phone first.
@@ -128,6 +129,5 @@ deadlines. `buildContext()` now opens with today's date.
 - No rate limit on `/.netlify/functions/claude`
 - Demo data is slightly stale (references old coursework)
 - `mcp.js` could write to Supabase directly and retire the inbox queue
-- Not built yet: the Upcoming panel on Today (next 7-14 days, collapsed to a
-  single line on mobile), and a study-plan tool - open question whether that's a
-  bulk `add_blocks` call or a rule that derives its own days like routines do
+- Not built yet: a study-plan tool - open question whether that's a bulk
+  `add_blocks` call or a rule that derives its own days like routines do
