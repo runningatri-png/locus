@@ -397,13 +397,57 @@ input, textarea, select {
 
 /* ---------- layout helpers ---------- */
 .today-grid {
-  max-width: 880px;
+  max-width: 1180px;
   padding: 0 26px 32px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 18px;
+  align-items: start;
 }
+
+/* ---------- upcoming (Today) ---------- */
+.up-side { position: sticky; top: 0; }
+.up-mobile { display: none; }
+.up-body { padding: 0 12px 12px; border-top: 1px solid var(--border); }
+.up-day { padding-top: 12px; }
+.up-date {
+  font-size: 10px; font-weight: 700; color: var(--muted);
+  text-transform: uppercase; letter-spacing: 0.12em; margin: 0 4px 6px;
+}
+.up-item {
+  display: flex; align-items: baseline; gap: 8px; width: 100%;
+  text-align: left; font: inherit; font-size: 13px; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 5px; cursor: pointer;
+}
+.up-item:hover { border-color: var(--accent-line); }
+.up-due { border-left-color: var(--amber); }
+.up-hot { border-left-color: var(--red); font-weight: 600; }
+.up-tag { font-family: var(--mono); font-size: 10px; color: var(--amber); flex-shrink: 0; }
+.up-hot .up-tag { color: var(--red); }
+.up-time { color: var(--accent); }
+.up-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.up-empty { font-size: 12.5px; color: var(--muted); padding: 14px 4px 2px; line-height: 1.6; }
+.up-line {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: none; border: none; font: inherit; font-size: 13.5px;
+  color: var(--text); text-align: left; padding: 12px 14px; cursor: pointer;
+}
+.up-line .up-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.up-next { color: var(--muted); font-weight: 600; flex-shrink: 0; }
+.up-more { font-size: 11.5px; color: var(--muted); flex-shrink: 0; }
+.up-chev { color: var(--muted); font-size: 18px; line-height: 1; transition: transform 0.15s; flex-shrink: 0; }
+.up-chev.open { transform: rotate(90deg); }
 .pad { padding: 0 26px 32px; }
 .mobile-only { display: none; }
 
 @media (max-width: 760px) {
+  /* Phone: Today stays one column. Upcoming shrinks to a collapsible line. */
+  .today-grid { grid-template-columns: minmax(0, 1fr); }
+  .up-side { display: none; }
+  .up-mobile { display: block; }
+
   .topbar { flex-wrap: wrap; gap: 12px; padding: 16px 14px 12px; }
   .topbar > .icon-btn:first-child { order: 0; }
   .topbar-title { order: 1; }

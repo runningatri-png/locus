@@ -76,3 +76,52 @@ export function countdown(fromKey, toKey) {
   if (n === 1) return "tomorrow";
   return `in ${n} days`;
 }
+
+/** A block the user put there themselves, as opposed to one a routine or fixed
+ *  commitment produced. Auto-placed blocks carry `src` (or are `derived` on
+ *  future days); a one-off carries neither. */
+export function isOneOff(b) {
+  return !b.src && !b.derived && !b.fixed && !b.tracked;
+}
+
+/**
+ * The Upcoming list on Today: deadlines and one-off blocks from today through
+ * `span` days ahead, grouped by date, empty days left out. Recurring routines
+ * are excluded on purpose - they're the same every week, so leaving them out is
+ * what lets the unusual things stand out.
+ *
+ * `viewOf(key)` is the app's own dayView(), passed in rather than re-derived,
+ * so there's still exactly one answer to "what's on this date".
+ *
+ * Today's blocks are skipped (they're already in the plan beside the panel);
+ * today's deadlines are kept, because tasks aren't blocks and appear nowhere
+ * else on Today.
+ */
+export function upcomingDays(todayK, span, viewOf) {
+  const out = [];
+  for (let rel = 0; rel <= span; rel++) {
+    const key = addDays(todayK, rel);
+    const v = viewOf(key);
+    // High importance first within a day - the thing you can't miss leads.
+    const deadlines = [...v.deadlines].sort((a, b) => (b.imp || 2) - (a.imp || 2));
+    const blocks =
+      rel === 0 ? [] : v.blocks.filter((b) => isOneOff(b) && !b.done && b.status !== "skipped");
+    if (deadlines.length || blocks.length) out.push({ key, rel, deadlines, blocks });
+  }
+  return out;
+}
+
+/** The single nearest item, for the collapsed one-line summary on mobile.
+ *  Deadlines lead within a day, matching the order the full list shows. */
+export function nextUpcoming(groups) {
+  const g = groups[0];
+  if (!g) return null;
+  const t = g.deadlines[0];
+  return {
+    key: g.key,
+    rel: g.rel,
+    title: t ? t.name : g.blocks[0].title,
+    deadline: !!t,
+    total: groups.reduce((n, x) => n + x.deadlines.length + x.blocks.length, 0),
+  };
+}

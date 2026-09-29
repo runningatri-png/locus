@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { supabase, pullAll, pushItems, pushPlanDay, pushDoc, isEmptyState } from "./db";
 import { IS_DEMO, DEMO_STATE } from "./demo";
 import { DAY_NAMES, DAY_SHORT, parseDays, effectiveDays, runsOn } from "./days";
-import { isoKey, addDays, daysBetween, norm, dueKey, countdown } from "./dayview";
+import { isoKey, addDays, daysBetween, norm, dueKey, countdown, upcomingDays, nextUpcoming } from "./dayview";
 import "./App.css";
 
 const KEYS = {
@@ -420,6 +420,8 @@ export default function App() {
 
   const [calMonth, setCalMonth] = useState(() => new Date(now.getFullYear(), now.getMonth(), 1));
   const [calSelected, setCalSelected] = useState(todayK);
+  // Mobile only: the Upcoming summary line starts collapsed so Today stays uncluttered.
+  const [upOpen, setUpOpen] = useState(false);
 
   const chatEndRef = useRef(null);
   const tmrEndRef = useRef(null);
@@ -1579,6 +1581,20 @@ Rough one. Dropped the deep work block and moved the call to tonight.
   const selectedDateObj = dateAt(calSelected);
   const selectedView = dayView(calSelected);
 
+  // The Upcoming panel on Today: the next two weeks of deadlines and one-off
+  // blocks. Built from dayView() so it can never disagree with Calendar.
+  const upcoming = upcomingDays(todayK, 14, dayView);
+  const nextUp = nextUpcoming(upcoming);
+
+  // Jump to a date in Calendar. The month has to move too, or a date early next
+  // month would be selected but not on screen.
+  const openDay = (k) => {
+    const d = dateAt(k);
+    setCalMonth(new Date(d.getFullYear(), d.getMonth(), 1));
+    setCalSelected(k);
+    setTab("calendar");
+  };
+
   // High-importance tasks falling in the week AFTER a given day. Shown as a
   // countdown so the pressure is visible on the days you'd prepare on, not only
   // once it's too late to do anything about it.
@@ -2136,6 +2152,25 @@ Rough one. Dropped the deep work block and moved the call to tonight.
           <div className="scroll" style={{ flex: 1 }}>
             <div className="today-grid">
               <div style={{ display: "flex", flexDirection: "column", gap: 18, minWidth: 0 }}>
+                {/* Mobile: one collapsed line instead of a second column. */}
+                {nextUp && (
+                  <div className="card up-mobile">
+                    <button className="up-line" onClick={() => setUpOpen((o) => !o)} aria-expanded={upOpen}>
+                      <span className="up-next">Next:</span>
+                      <span className="up-name">
+                        {nextUp.title} {countdown(todayK, nextUp.key)}
+                      </span>
+                      {nextUp.total > 1 && <span className="up-more">+{nextUp.total - 1}</span>}
+                      <span className={"up-chev" + (upOpen ? " open" : "")}>&rsaquo;</span>
+                    </button>
+                    {upOpen && (
+                      <div className="up-body">
+                        <UpcomingList groups={upcoming} todayK={todayK} onOpen={openDay} />
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 <div className="card">
                   <div className="card-head">
                     <div className="card-title">Today</div>
@@ -2247,6 +2282,17 @@ Rough one. Dropped the deep work block and moved the call to tonight.
                   </div>
                 </div>
               </div>
+
+              {/* Wide screens: Upcoming as its own column beside the plan. */}
+              <aside className="card up-side">
+                <div className="card-head">
+                  <div className="card-title">Upcoming</div>
+                  <div style={{ marginLeft: "auto", fontSize: 11.5, color: "var(--muted)" }}>next 2 weeks</div>
+                </div>
+                <div className="up-body">
+                  <UpcomingList groups={upcoming} todayK={todayK} onOpen={openDay} />
+                </div>
+              </aside>
             </div>
           </div>
         )}
@@ -3707,6 +3753,46 @@ Rough one. Dropped the deep work block and moved the call to tonight.
   );
 }
 
+
+/**
+ * Upcoming: the next two weeks grouped by date. Deadlines lead each day (a due
+ * date is the one thing you can't move by rearranging), high importance in red.
+ * Routines are left out upstream, in upcomingDays(), so one-offs stand out.
+ * Every row opens its day in Calendar.
+ */
+function UpcomingList({ groups, todayK, onOpen }) {
+  if (!groups.length) {
+    return <div className="up-empty">Nothing due or scheduled in the next two weeks.</div>;
+  }
+  return groups.map((g) => {
+    const label =
+      g.rel === 0
+        ? "Today"
+        : g.rel === 1
+        ? "Tomorrow"
+        : `${dateAt(g.key).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })} · ${countdown(todayK, g.key)}`;
+    return (
+      <div key={g.key} className="up-day">
+        <div className="up-date">{label}</div>
+        {g.deadlines.map((t) => {
+          const hot = (t.imp || 2) === 3;
+          return (
+            <button key={t.id} className={"up-item up-due" + (hot ? " up-hot" : "")} onClick={() => onOpen(g.key)}>
+              <span className="up-tag">{hot ? "DUE · HIGH" : "DUE"}</span>
+              <span className="up-name">{t.name}</span>
+            </button>
+          );
+        })}
+        {g.blocks.map((b) => (
+          <button key={b.id} className="up-item" onClick={() => onOpen(g.key)}>
+            <span className="up-tag up-time">{b.time}</span>
+            <span className="up-name">{b.title}</span>
+          </button>
+        ))}
+      </div>
+    );
+  });
+}
 
 function PlanBlock({ block, cat, tint, onToggle, onSkip, onReschedule, onStart, onDelete, skipCount }) {
   const [menuOpen, setMenuOpen] = useState(false);
