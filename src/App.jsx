@@ -1722,7 +1722,7 @@ Rough one. Dropped the deep work block and moved the call to tonight.
 
 
   const [theme, setTheme] = useState(() => localStorage.getItem("locus_theme") || "light");
-  const [userName, setUserName] = useState(() => localStorage.getItem("locus_name") || (IS_DEMO ? "Atri" : ""));
+  const [userName, setUserName] = useState(() => (IS_DEMO ? "Alex" : localStorage.getItem("locus_name") || ""));
   const [cmdInput, setCmdInput] = useState("");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const cmdRef = useRef(null);
